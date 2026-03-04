@@ -27,7 +27,9 @@ pip install -r requirements.txt
 ```
 
 # Copy environment variables
+```
 cp .env.example .env
+```
 # Edit .env with your DeepSeek token 
 ```bash
 # OR
