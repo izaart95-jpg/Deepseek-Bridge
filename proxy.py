@@ -177,7 +177,7 @@ class Handler(BaseHTTPRequestHandler):
         body     = self._body()
         messages = body.get("messages", [])
         model    = body.get("model",    "deepseek-chat")
-        stream   = body.get("stream",   False)
+        stream   = body.get("stream",   True)
         thinking = (
             body.get("thinking",  False) or
             body.get("deepThink", False) or
@@ -224,10 +224,11 @@ class Handler(BaseHTTPRequestHandler):
     # ── streaming ─────────────────────────────────────────────────────────────
 
     def _stream(self, api, chat_id, par_id, prompt, model, thinking, search):
+        self.close_connection = True  # drop TCP after stream ends
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control","no-cache")
-        self.send_header("Connection",   "keep-alive")
+        self.send_header("Connection",   "close")
         self._cors(); self.end_headers()
 
         rid     = "chatcmpl-" + uuid.uuid4().hex
@@ -294,7 +295,11 @@ class Handler(BaseHTTPRequestHandler):
              "finish_reason": "stop"}]})
         try:
             self.wfile.write(b"data: [DONE]\n\n"); self.wfile.flush()
-        except (BrokenPipeError, ConnectionResetError): pass
+        except (BrokenPipeError, ConnectionResetError, OSError): pass
+        finally:
+            try: self.wfile.close()
+            except OSError: pass
+        self.close_connection = True
 
     # ── non-streaming ─────────────────────────────────────────────────────────
 
