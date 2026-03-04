@@ -136,3 +136,6 @@ curl -X POST http://localhost:3000/v1/chat/completions \
     "stream": false
   }'
   ```
+
+### Acknowledgements
+https://github.com/xtekky/deepseek4free
