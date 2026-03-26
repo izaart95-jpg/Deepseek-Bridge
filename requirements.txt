@@ -6,3 +6,5 @@ drissionpage
 setuptools
 uvicorn
 fastapi
+python-dotenv
+requests
