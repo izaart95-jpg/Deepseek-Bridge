@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-DeepSeek OpenAI-Compatible Proxy  (v6 — source verified from working api.py)
+DeepSeek OpenAI-Compatible Proxy  (v7 — fixed I/O closed file error)
 =============================================================================
 Chunk types yielded by the patched api.py chat_completion():
   {'type': 'ready',          'request_message_id': N, 'response_message_id': N}
@@ -221,24 +221,25 @@ class Handler(BaseHTTPRequestHandler):
         else:
             self._block(api, chat_id, par_id, prompt, model, thinking, search)
 
-    # ── streaming ─────────────────────────────────────────────────────────────
+    # ── streaming (FIXED: removed close_connection and wfile.close) ──────────
 
     def _stream(self, api, chat_id, par_id, prompt, model, thinking, search):
-        self.close_connection = True  # drop TCP after stream ends
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
-        self.send_header("Cache-Control","no-cache")
-        self.send_header("Connection",   "close")
-        self._cors(); self.end_headers()
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "close")
+        self._cors()
+        self.end_headers()
 
-        rid     = "chatcmpl-" + uuid.uuid4().hex
+        rid = "chatcmpl-" + uuid.uuid4().hex
         created = int(time.time())
 
         def sse(obj):
             try:
                 self.wfile.write(f"data: {json.dumps(obj)}\n\n".encode())
                 self.wfile.flush()
-            except (BrokenPipeError, ConnectionResetError): pass
+            except (BrokenPipeError, ConnectionResetError):
+                pass
 
         # role-establishing chunk (required by most clients)
         sse({"id": rid, "object": "chat.completion.chunk", "created": created,
@@ -261,7 +262,8 @@ class Handler(BaseHTTPRequestHandler):
                 # ── capture response_message_id for history threading ─────────
                 if ctype == "ready" and _use_history:
                     mid = chunk.get("response_message_id")
-                    if mid: _set_hist_par(mid)
+                    if mid:
+                        _set_hist_par(mid)
 
                 # ── only 'content' chunks carry text to forward ───────────────
                 if ctype != "content":
@@ -278,28 +280,34 @@ class Handler(BaseHTTPRequestHandler):
                                   "finish_reason": None}]})
 
         except AuthenticationError as e:
-            sse({"error": {"message": str(e), "type": "authentication_error"}}); return
+            sse({"error": {"message": str(e), "type": "authentication_error"}})
+            return
         except RateLimitError as e:
-            sse({"error": {"message": str(e), "type": "rate_limit_error"}}); return
+            sse({"error": {"message": str(e), "type": "rate_limit_error"}})
+            return
         except CloudflareError as e:
-            sse({"error": {"message": str(e), "type": "cloudflare_error"}}); return
+            sse({"error": {"message": str(e), "type": "cloudflare_error"}})
+            return
         except (NetworkError, APIError) as e:
-            sse({"error": {"message": str(e), "type": "api_error"}}); return
-        except (BrokenPipeError, ConnectionResetError): return
+            sse({"error": {"message": str(e), "type": "api_error"}})
+            return
+        except (BrokenPipeError, ConnectionResetError):
+            return
         except Exception as e:
-            log.exception("Stream error: %s", e); return
+            log.exception("Stream error: %s", e)
+            return
 
         # stop chunk
         sse({"id": rid, "object": "chat.completion.chunk", "created": created,
              "model": model, "choices": [{"index": 0, "delta": {},
              "finish_reason": "stop"}]})
+
+        # Send [DONE] with safe error handling
         try:
-            self.wfile.write(b"data: [DONE]\n\n"); self.wfile.flush()
-        except (BrokenPipeError, ConnectionResetError, OSError): pass
-        finally:
-            try: self.wfile.close()
-            except OSError: pass
-        self.close_connection = True
+            self.wfile.write(b"data: [DONE]\n\n")
+            self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass
 
     # ── non-streaming ─────────────────────────────────────────────────────────
 
@@ -349,7 +357,7 @@ class Handler(BaseHTTPRequestHandler):
 # ── main ──────────────────────────────────────────────────────────────────────
 
 def main():
-    log.info("DeepSeek OpenAI Proxy  v6")
+    log.info("DeepSeek OpenAI Proxy  v7 (fixed I/O closed file error)")
     log.info("  Port      : %d", PORT)
     log.info("  Proxy key : %s", PROXY_API_KEY or "(open)")
     log.info("  DS token  : %s", "SET" if DEEPSEEK_TOKEN else "NOT SET  ← export DEEPSEEK_TOKEN=...")
