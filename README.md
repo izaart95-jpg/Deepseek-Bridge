@@ -24,6 +24,7 @@ cd DeepRouter
 # Install dependencies
 ```bash
 pip install -r requirements.txt
+# OR  pip install --upgrade -r requirements.txt
 ```
 # Get Deepseek Token
 Go to chat.deepseek.com login if required
