@@ -6,3 +6,4 @@ drissionpage
 setuptools
 uvicorn
 fastapi
+DrissionPage
