@@ -49,7 +49,7 @@ python interactive_chat.py
 
 # Run Openai compaitable api proxy
 ```bash
-python server.py
+python proxy.py
 ```
 
 ## Turn History On
