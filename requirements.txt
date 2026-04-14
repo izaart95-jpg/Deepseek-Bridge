@@ -7,3 +7,4 @@ uvicorn
 fastapi
 python-dotenv
 requests
+curl_cffi
