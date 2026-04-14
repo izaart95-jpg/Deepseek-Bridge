@@ -1,6 +1,13 @@
-# DeepSeek Python Api (Free)
+# DeepSeek Free API
 
-A Python DeepSeek API proxy with Cloudflare bypass capabilities and OpenAI-compatible Api format.
+> A Python proxy for DeepSeek with Cloudflare bypass and OpenAI-compatible interface — no paid API key required.
+
+![Python](https://img.shields.io/badge/Python-3.x-blue?style=flat-square)
+![OpenAI Compatible](https://img.shields.io/badge/OpenAI-Compatible-green?style=flat-square)
+![Cloudflare Bypass](https://img.shields.io/badge/Cloudflare-Bypass-purple?style=flat-square)
+![Free API](https://img.shields.io/badge/API-Free-orange?style=flat-square)
+
+---
 
 ## Features
 
@@ -13,132 +20,172 @@ A Python DeepSeek API proxy with Cloudflare bypass capabilities and OpenAI-compa
 - Streaming and non-streaming responses
 - Threaded conversation support
 
+---
+
 ## Installation
 
+### 1. Clone the repository
+
 ```bash
-# Clone the repository
 git clone https://github.com/izaart95-jpg/DeepRouter.git
 cd DeepRouter
 ```
 
-# Install dependencies
+### 2. Install dependencies
+
 ```bash
 pip install -r requirements.txt
-# OR  pip install --upgrade -r requirements.txt
+# or, to ensure latest versions:
+pip install --upgrade -r requirements.txt
 ```
-# Get Deepseek Token
-Go to chat.deepseek.com login if required
-open devtools and run
-```bash
+
+### 3. Obtain your DeepSeek token
+
+1. Navigate to [chat.deepseek.com](https://chat.deepseek.com) and sign in
+2. Open browser DevTools (F12) and go to the Console tab
+3. Run the following snippet:
+
+```js
 JSON.parse(localStorage.getItem("userToken")).value
 ```
 
-# Copy environment variables
-```
+### 4. Configure environment
+
+```bash
 cp .env.example .env
 ```
-# Edit .env with your DeepSeek token 
+
+Edit `.env` with your token, or export it directly:
+
 ```bash
-# OR
-export DEEPSEEK_TOKEN=token  # without quotes
-# $env:DEEPSEEK_TOKEN="cxz7RlyD+..........0aXG1";For windows
+# Linux / macOS
+export DEEPSEEK_TOKEN=your_token_here
+
+# Windows (PowerShell)
+$env:DEEPSEEK_TOKEN="your_token_here"
 ```
 
-# Run Interactive Chat
+---
+
+## Running
+
+### Interactive CLI chat
+
 ```bash
 python interactive_chat.py
 ```
 
-# Run Openai compaitable api proxy
+### OpenAI-compatible proxy server
+
 ```bash
 python proxy.py
-# note : works best for python version below 3.12
 ```
 
-## Turn History On
+> **Note:** Best results with Python below 3.12. Compatibility issues may occur on newer versions.
+
+---
+
+## API Reference
+
+The proxy runs at `http://localhost:3000`. All endpoints require the bearer token `deepseek-proxy`.
+
+### `POST /history` — Toggle conversation history
+
 ```bash
+# Enable
 curl -X POST http://localhost:3000/history \
   -H "Authorization: Bearer deepseek-proxy" \
   -H "Content-Type: application/json" \
   -d '{"enable": true}'
-```
-## Turn History Off
-```bash
+
+# Disable
 curl -X POST http://localhost:3000/history \
   -H "Authorization: Bearer deepseek-proxy" \
   -H "Content-Type: application/json" \
   -d '{"enable": false}'
 ```
-## Create new session
+
+### `POST /new` — Create a new session
+
 ```bash
 curl -X POST http://localhost:3000/new \
   -H "Authorization: Bearer deepseek-proxy"
 ```
-## Search and Thinking enabled - No Streaming
+
+### `POST /v1/chat/completions` — Chat completions (OpenAI format)
+
+Supports `deepseek-chat` and `deepseek-reasoner` models, with optional thinking and web search.
+
+**Non-streaming with thinking + search:**
+
 ```bash
 curl -X POST http://localhost:3000/v1/chat/completions \
   -H "Authorization: Bearer deepseek-proxy" \
   -H "Content-Type: application/json" \
   -d '{
     "model": "deepseek-reasoner",
-    "messages": [
-      {"role": "user", "content": "What is the latest news about AI?"}
-    ],
+    "messages": [{"role": "user", "content": "What is the latest news about AI?"}],
     "thinking": true,
     "search": true,
     "stream": false
   }'
 ```
-## Search and Thinking With Stream
+
+**Streaming with thinking + search:**
+
 ```bash
 curl -X POST http://localhost:3000/v1/chat/completions \
   -H "Authorization: Bearer deepseek-proxy" \
   -H "Content-Type: application/json" \
   -d '{
     "model": "deepseek-reasoner",
-    "messages": [
-      {"role": "user", "content": "Explain quantum computing in simple terms"}
-    ],
+    "messages": [{"role": "user", "content": "Explain quantum computing in simple terms"}],
     "thinking": true,
     "search": true,
     "stream": true
   }'
 ```
-## Conversation Example - History On
-``` # First, enable history
+
+### Multi-turn conversation example
+
+Enable history first, then send messages sequentially — the model retains context across requests.
+
+```bash
+# Step 1: Enable history
 curl -X POST http://localhost:3000/history \
   -H "Authorization: Bearer deepseek-proxy" \
   -H "Content-Type: application/json" \
   -d '{"enable": true}'
 
-# First message
+# Step 2: First message
 curl -X POST http://localhost:3000/v1/chat/completions \
   -H "Authorization: Bearer deepseek-proxy" \
   -H "Content-Type: application/json" \
   -d '{
     "model": "deepseek-chat",
-    "messages": [
-      {"role": "user", "content": "My name is John"}
-    ],
+    "messages": [{"role": "user", "content": "My name is John"}],
     "thinking": false,
     "search": false,
     "stream": false
   }'
 
-# Second message - should remember your name
+# Step 3: Follow-up — model should remember the name
 curl -X POST http://localhost:3000/v1/chat/completions \
   -H "Authorization: Bearer deepseek-proxy" \
   -H "Content-Type: application/json" \
   -d '{
     "model": "deepseek-chat",
-    "messages": [
-      {"role": "user", "content": "What is my name?"}
-    ],
+    "messages": [{"role": "user", "content": "What is my name?"}],
     "thinking": false,
     "search": false,
     "stream": false
   }'
-  ```
+```
 
-### Acknowledgements
-https://github.com/xtekky/deepseek4free
+> The second request should return "John" — history is preserved across calls.
+
+---
+
+## Acknowledgements
+
+- [github.com/xtekky/deepseek4free](https://github.com/xtekky/deepseek4free)
