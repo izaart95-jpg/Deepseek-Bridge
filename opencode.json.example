@@ -1,0 +1,32 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "deepseek-local": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Local DeepSeek Proxy",
+      "options": {
+        "baseURL": "http://localhost:3000/v1",
+        "apiKey": "deepseek-proxy"
+      },
+      "models": {
+        "deepseek-chat": {
+          "name": "DeepSeek Chat",
+          "limit": {
+            "context": 64000,
+            "output": 4096
+          }
+        },
+        "deepseek-reasoner": {
+          "name": "DeepSeek Reasoner",
+          "limit": {
+            "context": 64000,
+            "output": 4096
+          }
+        }
+      }
+    }
+  },
+  "plugin": [
+    "oh-my-opencode@latest"
+  ]
+}

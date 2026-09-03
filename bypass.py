@@ -1,4 +1,4 @@
-# run_and_get_cookies.py
+# runandgetcookies
 import subprocess
 import os
 import sys
