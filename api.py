@@ -2,7 +2,7 @@ from curl_cffi import requests
 from typing import Optional, Dict, Any, Generator, Literal
 import json
 from pow import DeepSeekPOW
-import pkg_resources
+
 import sys
 from pathlib import Path
 import subprocess
@@ -43,15 +43,6 @@ class DeepSeekAPI:
     def __init__(self, auth_token: str):
         if not auth_token or not isinstance(auth_token, str):
             raise AuthenticationError("Invalid auth token provided")
-
-        try:
-            curl_cffi_version = pkg_resources.get_distribution('curl-cffi').version
-            if curl_cffi_version != '0.8.1b9':
-                print("\033[93mWarning: DeepSeek API requires curl-cffi version 0.8.1b9", file=sys.stderr)
-                print("Please install the correct version using: pip install curl-cffi==0.8.1b9\033[0m", file=sys.stderr)
-        except pkg_resources.DistributionNotFound:
-            print("\033[93mWarning: curl-cffi not found. Please install version 0.8.1b9:", file=sys.stderr)
-            print("pip install curl-cffi==0.8.1b9\033[0m", file=sys.stderr)
 
         self.auth_token = auth_token
         self.pow_solver = DeepSeekPOW()
@@ -248,27 +239,27 @@ class DeepSeekAPI:
 
             current_content = ""
             message_complete = False
-            
+
             for line in response.iter_lines():
                 if not line:
                     continue
-                    
+
                 try:
                     line_str = line.decode('utf-8')
-                    
+
                     # Handle different event types
                     if line_str.startswith('event: '):
                         event_type = line_str[7:]
                         continue
                     elif line_str.startswith('data: '):
                         data_str = line_str[6:]
-                        
+
                         # Skip empty data
                         if not data_str:
                             continue
-                        
+
                         data = json.loads(data_str)
-                        
+
                         # Handle different response formats
                         if 'request_message_id' in data:
                             # Initial ready event
@@ -277,26 +268,26 @@ class DeepSeekAPI:
                                 'request_message_id': data['request_message_id'],
                                 'response_message_id': data['response_message_id']
                             }
-                        
+
                         elif 'updated_at' in data:
                             # Session update event
                             yield {
                                 'type': 'session_update',
                                 'updated_at': data['updated_at']
                             }
-                        
+
                         elif 'title' in data and 'content' in data:
                             # Title generation event
                             yield {
                                 'type': 'title',
                                 'content': data['content']
                             }
-                        
+
                         elif 'v' in data and isinstance(data['v'], dict) and 'response' in data['v']:
                             # Full response update with fragments
                             response_data = data['v']['response']
                             fragments = response_data.get('fragments', [])
-                            
+
                             for fragment in fragments:
                                 if fragment.get('type') == 'RESPONSE':
                                     yield {
@@ -305,12 +296,12 @@ class DeepSeekAPI:
                                         'fragment_id': fragment.get('id'),
                                         'stage_id': fragment.get('stage_id')
                                     }
-                        
+
                         elif 'o' in data and 'p' in data:
                             # JSON Patch operations
                             op = data['o']
                             path = data['p']
-                            
+
                             if op == 'APPEND' and path == 'response/fragments/-1/content':
                                 # Content append operation
                                 if 'v' in data:
@@ -320,17 +311,17 @@ class DeepSeekAPI:
                                         'content': data['v'],
                                         'full_content': current_content
                                     }
-                            
+
                             elif op == 'SET' and path == 'response/status' and 'v' in data:
                                 # Status update
                                 yield {
                                     'type': 'status',
                                     'status': data['v']
                                 }
-                                
+
                                 if data['v'] == 'FINISHED':
                                     message_complete = True
-                            
+
                             elif op == 'BATCH' and 'v' in data:
                                 # Batch operations
                                 for operation in data['v']:
@@ -340,7 +331,7 @@ class DeepSeekAPI:
                                             'status': 'FINISHED'
                                         }
                                         message_complete = True
-                        
+
                         elif 'v' in data and isinstance(data['v'], str):
                             # Simple content update
                             current_content += data['v']
@@ -349,14 +340,14 @@ class DeepSeekAPI:
                                 'content': data['v'],
                                 'full_content': current_content
                             }
-                        
+
                         if message_complete:
                             yield {
                                 'type': 'complete',
                                 'finish_reason': 'stop'
                             }
                             break
-                            
+
                 except json.JSONDecodeError as e:
                     raise APIError(f"Invalid JSON in response chunk: {e}")
                 except Exception as e:
