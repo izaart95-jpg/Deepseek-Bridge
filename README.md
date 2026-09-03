@@ -15,7 +15,6 @@
 - Cloudflare protection detection with automatic retry
 - Proof of Work (PoW) challenge solving — WASM run in-process via wazero
 - OpenAI-compatible proxy server
-- Interactive CLI chat client
 - Cookie management (loads `cookies.json`)
 - Streaming and non-streaming responses
 - Threaded conversation support
@@ -27,8 +26,9 @@
 ### 1. Clone the repository
 
 ```bash
-git clone https://github.com/izaart95-jpg/DeepRouter.git
+git clone https://github.com/izaart95-jpg/DeepseekFreeAPI.git DeepRouter
 cd DeepRouter
+go mod tidy
 ```
 
 ### 2. Build (requires Go 1.26+)
@@ -70,21 +70,9 @@ $env:DEEPSEEK_TOKEN="your_token_here"
 ### OpenAI-compatible proxy server
 
 ```bash
-# requires Go 1.26+ (https://go.dev/dl/go1.26.5.linux-amd64.tar.gz)
+# requires Go 1.26+
 go build -o deepseek-proxy .
 DEEPSEEK_TOKEN=<token> ./deepseek-proxy proxy
-```
-
-### Interactive CLI chat client
-
-```bash
-DEEPSEEK_TOKEN=<token> ./deepseek-proxy chat
-```
-
-### Test suite (requires DEEPSEEK_TOKEN)
-
-```bash
-DEEPSEEK_TOKEN=<token> go test -v .
 ```
 
 ---
