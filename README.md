@@ -131,7 +131,7 @@ curl -X POST http://localhost:3000/history \
   -d '{"enable": false}'
 ```
 
-> 🧹 **Garbage collector:** with history disabled, each request gets a fresh throwaway chat session. As soon as the response is done, the proxy asynchronously deletes that session upstream (`POST /chat_session/delete`) — mirroring how the Kimi reference cleans up its stateless sessions — so your DeepSeek account doesn't fill up with dead session IDs. Sessions created in history-enabled mode are never deleted; rotating via `POST /new` also collects the session it replaces.
+> 🧹 **Garbage collector:** with history disabled, each request gets a fresh throwaway chat session. As soon as the response is done, the proxy asynchronously deletes that session upstream (`POST /chat_session/delete`) — so your DeepSeek account doesn't fill up with dead session IDs. Sessions created in history-enabled mode are never deleted; rotating via `POST /new` also collects the session it replaces.
 
 ### `POST /new` — Create a new session
 
