@@ -30,7 +30,7 @@ func Run() {
 	}
 
 	port := envOr("PORT", "3000")
-	proxyKey := envOr("PROXY_API_KEY", "Waguri-san")
+	proxyKey := envOr("PROXY_API_KEY", "Waguri")
 	token := os.Getenv("DEEPSEEK_TOKEN")
 
 	logger := log.New(os.Stdout, "", log.LstdFlags)
