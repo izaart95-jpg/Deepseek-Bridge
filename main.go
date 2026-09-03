@@ -58,17 +58,5 @@ func runProxy() {
 }
 
 func main() {
-	cmd := "proxy"
-	if len(os.Args) > 1 {
-		cmd = os.Args[1]
-	}
-	switch cmd {
-	case "proxy":
-		runProxy()
-	case "chat":
-		runChat()
-	default:
-		fmt.Fprintf(os.Stderr, "usage: %s [proxy|chat]\n", os.Args[0])
-		os.Exit(2)
-	}
+	runProxy()
 }
