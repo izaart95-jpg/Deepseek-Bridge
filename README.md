@@ -18,6 +18,8 @@
 - Cookie management (loads `cookies.json`)
 - Streaming and non-streaming responses
 - Threaded conversation support
+- **Agent mode** (`--agent-mode` / `AGENT_MODE=true`) — OpenAI function/tool calling translated into a single role-tagged prompt; model tool-call blocks are parsed back into OpenAI `tool_calls`
+- **Debug mode** (`--debug` / `DEBUG=true`) — prints every request/response headers and bodies in both directions, PoW challenges, SSE frames and session IDs
 
 ---
 
@@ -73,7 +75,38 @@ $env:DEEPSEEK_TOKEN="your_token_here"
 # requires Go 1.26+
 go build -o deepseek-proxy .
 DEEPSEEK_TOKEN=<token> ./deepseek-proxy proxy
+
+# debug mode (verbose HTTP dumps)
+DEEPSEEK_TOKEN=<token> DEBUG=true ./deepseek-proxy proxy
+# or: ./deepseek-proxy --debug proxy
+
+# agent mode (OpenAI tool calling via prompt protocol)
+DEEPSEEK_TOKEN=<token> AGENT_MODE=true ./deepseek-proxy proxy
+# or: ./deepseek-proxy --agent-mode proxy
 ```
+
+### Agent mode
+
+Enable with `--agent-mode` or `AGENT_MODE=1|true|yes|on`. The proxy rewrites the whole OpenAI `messages` array (system/user/assistant/`tool` roles) plus the `tools` definitions into one role-tagged prompt ending in a `[TOOL CONTRACT]`. When the model wants to call a tool it emits a block like:
+
+```
+<<<TOOL_CALL>>>
+{"name":"get_weather","arguments":{"city":"Paris"}}
+<<<END_TOOL_CALL>>>
+```
+
+These blocks never reach your client as text:
+
+- **Non-streaming** → parsed into OpenAI `tool_calls` on the assistant message, `finish_reason: "tool_calls"`; send the tool result back as a `role:"tool"` message.
+- **Streaming** → content deltas flow normally, each parsed call becomes a `delta.tool_calls` chunk, and the stream ends with `finish_reason: "tool_calls"`.
+
+Web search is forced off in this mode so tool answers stay deterministic.
+
+### Debug mode
+
+Enable with `--debug` or `DEBUG=1|true|yes|on`. Every exchange is printed to stderr: client requests (method/path/headers/body), upstream requests to DeepSeek (URL/headers/cookies/body), upstream responses (status/headers/body), streaming SSE frames both ways, PoW challenge + solution, and parsed agent tool calls. Bodies longer than 4 KB are truncated.
+
+> ⚠️ Debug logs contain your DeepSeek token and cookies unredacted — don't paste them publicly.
 
 ---
 

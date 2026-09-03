@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -119,6 +120,10 @@ func (s *ProxyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	cors()
 
+	if debugMode {
+		debugDumpClientRequest(r, nil) // headers only; handlers dump the body
+	}
+
 	if !s.checkAuth(r) {
 		writeError(w, "Bad token", "authentication_error", "invalid_api_key", 401)
 		return
@@ -185,23 +190,35 @@ func (s *ProxyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	writeError(w, "Not Found", "invalid_request_error", "not_found", 404)
 }
 
+// chatMessage is one OpenAI-style message. Content stays raw so both string
+// and typed-part arrays are accepted.
+type chatMessage struct {
+	Role       string              `json:"role"`
+	Content    json.RawMessage     `json:"content"`
+	ToolCallID string              `json:"tool_call_id,omitempty"`
+	ToolCalls  []assistantToolCall `json:"tool_calls,omitempty"`
+	Name       string              `json:"name,omitempty"`
+}
+
 // chatRequest mirrors the OpenAI-style request body.
 type chatRequest struct {
-	Messages []struct {
-		Role    string          `json:"role"`
-		Content json.RawMessage `json:"content"`
-	} `json:"messages"`
-	Model     string `json:"model"`
-	Stream    bool   `json:"stream"`
-	Thinking  bool   `json:"thinking"`
-	DeepThink bool   `json:"deepThink"`
-	Search    bool   `json:"search"`
+	Messages  []chatMessage `json:"messages"`
+	Model     string        `json:"model"`
+	Stream    bool          `json:"stream"`
+	Thinking  bool          `json:"thinking"`
+	DeepThink bool          `json:"deepThink"`
+	Search    bool          `json:"search"`
+	Tools     []openAITool  `json:"tools,omitempty"`
 }
 
 func (s *ProxyServer) handleChat(w http.ResponseWriter, r *http.Request) {
 	var body chatRequest
-	if err := decodeBody(w, r, &body); err != nil {
+	rawBody, err := decodeBodyRaw(w, r, &body)
+	if err != nil {
 		return
+	}
+	if debugMode {
+		debugDumpClientRequest(r, rawBody)
 	}
 
 	model := body.Model
@@ -213,7 +230,14 @@ func (s *ProxyServer) handleChat(w http.ResponseWriter, r *http.Request) {
 	search := body.Search
 
 	prompt := ""
-	if len(body.Messages) > 0 {
+	if agentMode {
+		// Agent mode folds every message plus the tool contract into one
+		// role-aware prompt so the model cannot silently use tools outside
+		// the caller's OpenAI tool contract (web search stays off).
+		prompt = buildAgentPrompt(body.Messages, body.Tools)
+		search = false
+		debugf("agent prompt (%d chars):\n%s", len(prompt), prompt)
+	} else if len(body.Messages) > 0 {
 		raw := body.Messages[len(body.Messages)-1].Content
 		var s string
 		if json.Unmarshal(raw, &s) == nil {
@@ -266,7 +290,7 @@ func (s *ProxyServer) handleChat(w http.ResponseWriter, r *http.Request) {
 		s.log.Printf("Stateless session: %s", chatID)
 	}
 
-	s.log.Printf("-> model=%-20s think=%-5v search=%-5v history=%v", model, thinking, search, s.getUseHistory())
+	s.log.Printf("-> model=%-20s think=%-5v search=%-5v history=%-5v agent=%v", model, thinking, search, s.getUseHistory(), agentMode)
 
 	params := ChatParams{
 		ChatSessionID:   chatID,
@@ -292,6 +316,9 @@ func (s *ProxyServer) streamResponse(w http.ResponseWriter, r *http.Request, api
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "close")
+	if debugMode {
+		debugDumpClientResponse(200, w.Header())
+	}
 	w.WriteHeader(200)
 
 	rid := "chatcmpl-" + randomHex(16)
@@ -302,6 +329,7 @@ func (s *ProxyServer) streamResponse(w http.ResponseWriter, r *http.Request, api
 		if err != nil {
 			return false
 		}
+		debugf("sse -> %s", raw)
 		if _, err := w.Write(append([]byte("data: "), append(raw, []byte("\n\n")...)...)); err != nil {
 			return false
 		}
@@ -309,11 +337,22 @@ func (s *ProxyServer) streamResponse(w http.ResponseWriter, r *http.Request, api
 		return true
 	}
 
+	contentChunk := func(text string, finish any) map[string]any {
+		return map[string]any{
+			"id": rid, "object": "chat.completion.chunk", "created": created, "model": model,
+			"choices": []any{map[string]any{"index": 0, "delta": map[string]any{"content": text}, "finish_reason": finish}},
+		}
+	}
+
 	// role-establishing chunk (required by most clients)
-	sse(map[string]any{
-		"id": rid, "object": "chat.completion.chunk", "created": created, "model": model,
-		"choices": []any{map[string]any{"index": 0, "delta": map[string]any{"role": "assistant", "content": ""}, "finish_reason": nil}},
-	})
+	sse(contentChunkRole(rid, created, model))
+
+	// agent mode: incrementally split model text from tool-call blocks
+	var interceptor *agentStreamInterceptor
+	if agentMode {
+		interceptor = &agentStreamInterceptor{}
+	}
+	emittedToolCall := false
 
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
@@ -325,10 +364,24 @@ func (s *ProxyServer) streamResponse(w http.ResponseWriter, r *http.Request, api
 		if ch.Type != "content" || ch.Content == "" {
 			return false
 		}
-		return !sse(map[string]any{
-			"id": rid, "object": "chat.completion.chunk", "created": created, "model": model,
-			"choices": []any{map[string]any{"index": 0, "delta": map[string]any{"content": ch.Content}, "finish_reason": nil}},
-		})
+		if interceptor != nil {
+			parsed := interceptor.feed(ch.Content)
+			if parsed.content != "" && !sse(contentChunk(parsed.content, nil)) {
+				return true
+			}
+			for _, call := range parsed.toolCalls {
+				emittedToolCall = true
+				debugf("agent tool call #%d: %s(%s)", call["index"], call["function"].(map[string]any)["name"], call["function"].(map[string]any)["arguments"])
+				if !sse(map[string]any{
+					"id": rid, "object": "chat.completion.chunk", "created": created, "model": model,
+					"choices": []any{map[string]any{"index": 0, "delta": map[string]any{"tool_calls": []any{call}}, "finish_reason": nil}},
+				}) {
+					return true
+				}
+			}
+			return false
+		}
+		return !sse(contentChunk(ch.Content, nil))
 	})
 
 	if err != nil {
@@ -337,12 +390,31 @@ func (s *ProxyServer) streamResponse(w http.ResponseWriter, r *http.Request, api
 		return
 	}
 
+	if interceptor != nil {
+		if trailing := interceptor.flush(); trailing != "" {
+			sse(contentChunk(trailing, nil))
+		}
+	}
+
+	finishReason := "stop"
+	if emittedToolCall {
+		finishReason = "tool_calls"
+	}
 	sse(map[string]any{
 		"id": rid, "object": "chat.completion.chunk", "created": created, "model": model,
-		"choices": []any{map[string]any{"index": 0, "delta": map[string]any{}, "finish_reason": "stop"}},
+		"choices": []any{map[string]any{"index": 0, "delta": map[string]any{}, "finish_reason": finishReason}},
 	})
 	w.Write([]byte("data: [DONE]\n\n"))
 	flusher.Flush()
+}
+
+// contentChunkRole is the role-establishing first SSE chunk (required by most
+// clients).
+func contentChunkRole(rid string, created int64, model string) map[string]any {
+	return map[string]any{
+		"id": rid, "object": "chat.completion.chunk", "created": created, "model": model,
+		"choices": []any{map[string]any{"index": 0, "delta": map[string]any{"role": "assistant", "content": ""}, "finish_reason": nil}},
+	}
 }
 
 func (s *ProxyServer) blockResponse(w http.ResponseWriter, r *http.Request, api *DeepSeekAPI, params ChatParams, model string) {
@@ -366,6 +438,20 @@ func (s *ProxyServer) blockResponse(w http.ResponseWriter, r *http.Request, api 
 	}
 
 	answer := strings.Join(parts, "")
+	finishReason := "stop"
+	message := map[string]any{"role": "assistant", "content": answer}
+
+	if agentMode {
+		if calls := parseAgentToolCalls(answer); len(calls) > 0 {
+			finishReason = "tool_calls"
+			message["tool_calls"] = calls
+			debugf("agent tool calls parsed: %d", len(calls))
+			debugf("agent tool calls: %s", debugJSON(calls))
+		}
+		answer = stripAgentToolCalls(answer)
+		message["content"] = answer
+	}
+
 	promptTokens := countWords(params.Prompt)
 	completionTokens := countWords(answer)
 
@@ -376,8 +462,8 @@ func (s *ProxyServer) blockResponse(w http.ResponseWriter, r *http.Request, api 
 		"model":   model,
 		"choices": []any{map[string]any{
 			"index":         0,
-			"message":       map[string]any{"role": "assistant", "content": answer},
-			"finish_reason": "stop",
+			"message":       message,
+			"finish_reason": finishReason,
 		}},
 		"usage": map[string]any{
 			"prompt_tokens":     promptTokens,
@@ -396,6 +482,10 @@ func writeJSON(w http.ResponseWriter, status int, data any) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
+	if debugMode {
+		debugDumpClientResponse(status, w.Header())
+		debugf("  -> body: %s", debugIndent(debugTruncate(raw)))
+	}
 	w.WriteHeader(status)
 	w.Write(raw)
 }
@@ -412,13 +502,24 @@ func writeError(w http.ResponseWriter, msg, etype string, code any, status int) 
 }
 
 func decodeBody(w http.ResponseWriter, r *http.Request, dst any) error {
+	_, err := decodeBodyRaw(w, r, dst)
+	return err
+}
+
+// decodeBodyRaw decodes the JSON body into dst and also returns the raw bytes
+// so debug mode can dump exactly what the client sent.
+func decodeBodyRaw(w http.ResponseWriter, r *http.Request, dst any) ([]byte, error) {
 	r.Body = http.MaxBytesReader(w, r.Body, 16<<20)
-	dec := json.NewDecoder(r.Body)
-	if err := dec.Decode(dst); err != nil {
+	raw, err := io.ReadAll(r.Body)
+	if err != nil {
 		writeError(w, fmt.Sprintf("Invalid JSON body: %v", err), "invalid_request_error", "invalid_json", 400)
-		return err
+		return nil, err
 	}
-	return nil
+	if err := json.Unmarshal(raw, dst); err != nil {
+		writeError(w, fmt.Sprintf("Invalid JSON body: %v", err), "invalid_request_error", "invalid_json", 400)
+		return nil, err
+	}
+	return raw, nil
 }
 
 func toBool(v any) bool {
