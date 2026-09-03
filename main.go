@@ -42,6 +42,12 @@ func runProxy() {
 	} else {
 		logger.Printf("  DS token  : SET")
 	}
+	logger.Printf("  Debug     : %v", debugMode)
+	if agentMode {
+		logger.Printf("  Agent mode: ENABLED (OpenAI tools/roles translated, tool calls intercepted)")
+	} else {
+		logger.Printf("  Agent mode: disabled")
+	}
 	logger.Printf("  Endpoints : POST /v1/chat/completions")
 	logger.Printf("              GET  /v1/models")
 	logger.Printf("              GET  /history?enable=true|false")
@@ -58,5 +64,19 @@ func runProxy() {
 }
 
 func main() {
+	for _, arg := range os.Args[1:] {
+		switch arg {
+		case "--debug":
+			debugMode = true
+		case "--agent-mode":
+			agentMode = true
+		}
+	}
+	if boolEnv("DEBUG") {
+		debugMode = true
+	}
+	if boolEnv("AGENT_MODE") {
+		agentMode = true
+	}
 	runProxy()
 }

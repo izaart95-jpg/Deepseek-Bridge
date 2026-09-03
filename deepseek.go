@@ -155,6 +155,10 @@ func (c *DeepSeekAPI) makeRequest(ctx context.Context, method, endpoint string, 
 			if err != nil {
 				return nil, APIError{Msg: fmt.Sprintf("PoW solve failed: %v", err)}
 			}
+			if debugMode {
+				debugf("pow challenge: %s", debugJSON(*challenge))
+				debugf("pow response: %s", powResponse)
+			}
 		}
 
 		body, err := json.Marshal(jsonData)
@@ -169,6 +173,9 @@ func (c *DeepSeekAPI) makeRequest(ctx context.Context, method, endpoint string, 
 		for k, v := range c.cookies {
 			req.AddCookie(&http.Cookie{Name: k, Value: v})
 		}
+		if debugMode {
+			debugDumpOutgoingRequest(method, url, req.Header, body)
+		}
 
 		resp, err := c.client.Do(req)
 		if err != nil {
@@ -178,6 +185,9 @@ func (c *DeepSeekAPI) makeRequest(ctx context.Context, method, endpoint string, 
 		resp.Body.Close()
 		if readErr != nil {
 			return nil, NetworkError{Msg: fmt.Sprintf("Network error occurred: %v", readErr)}
+		}
+		if debugMode {
+			debugDumpIncomingResponse(resp.StatusCode, resp.Header, respBody)
 		}
 
 		text := string(respBody)
@@ -285,6 +295,10 @@ func (c *DeepSeekAPI) ChatCompletion(ctx context.Context, params ChatParams, onC
 	if err != nil {
 		return APIError{Msg: fmt.Sprintf("PoW solve failed: %v", err)}
 	}
+	if debugMode {
+		debugf("pow challenge: %s", debugJSON(*challenge))
+		debugf("pow response: %s", powResponse)
+	}
 
 	jsonData := map[string]any{
 		"chat_session_id":   params.ChatSessionID,
@@ -311,12 +325,18 @@ func (c *DeepSeekAPI) ChatCompletion(ctx context.Context, params ChatParams, onC
 	for k, v := range c.cookies {
 		req.AddCookie(&http.Cookie{Name: k, Value: v})
 	}
+	if debugMode {
+		debugDumpOutgoingRequest("POST", deepseekBaseURL+"/chat/completion", req.Header, body)
+	}
 
 	resp, err := c.client.Do(req)
 	if err != nil {
 		return NetworkError{Msg: fmt.Sprintf("Network error occurred during streaming: %v", err)}
 	}
 	defer resp.Body.Close()
+	if debugMode {
+		debugDumpIncomingResponse(resp.StatusCode, resp.Header, nil) // body is streamed below
+	}
 
 	if resp.StatusCode != 200 {
 		reader := bufio.NewReader(resp.Body)
@@ -346,6 +366,7 @@ func (c *DeepSeekAPI) ChatCompletion(ctx context.Context, params ChatParams, onC
 				if dataStr == "" {
 					continue
 				}
+				debugf("sse <- %s", dataStr)
 				var data map[string]any
 				if err := json.Unmarshal([]byte(dataStr), &data); err != nil {
 					return APIError{Msg: fmt.Sprintf("Invalid JSON in response chunk: %v", err)}
