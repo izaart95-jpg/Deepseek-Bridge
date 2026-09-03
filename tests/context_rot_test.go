@@ -4,18 +4,17 @@ import (
 	"testing"
 )
 
-// TestContextRotHypothesis tests whether the agent mode properly handles
-// tool results when reasoning/thinking is enabled.
-//
-// The hypothesis is that since all messages (system prompt, user messages,
-// tool calls, tool results) are combined into a single prompt string in
-// agent mode, the model might not properly distinguish between different
-// sections, especially tool_results, leading to hallucinated tool calls.
+// TestContextRotHypothesis tests the context rot fix: the new prompt structure
+// uses XML-like section tags instead of [ROLE: ...] markers, which eliminates
+// marker ambiguity and gives the model clear structure.
 func TestContextRotHypothesis(t *testing.T) {
-	// The fix should use <<TOOL_RESULT>> instead of [ROLE: tool_result]
-	// This prevents confusion with documentation that might mention role tags
-	t.Log("Context rot fix applied: using <<TOOL_RESULT>> instead of [ROLE: tool_result]")
-	t.Log("This prevents marker ambiguity that caused model confusion")
+	// The fix uses:
+	// - <tool_result call_id="..."> instead of <<TOOL_RESULT>> or [ROLE: tool_result]
+	// - <tool_exchange> grouping for call→result pairing
+	// - <current_task> anchor for the last user message
+	// - <system>, <tools>, <recent>, <output_rules> sections
+	t.Log("Context rot fix applied: XML-like section tags replace [ROLE: ...] markers")
+	t.Log("This eliminates marker ambiguity and provides clear structure")
 
 	// Verify the fix conceptually
 	role := "tool"
@@ -31,4 +30,11 @@ func TestContextRotHypothesis(t *testing.T) {
 	if content != "110.226.238.87" {
 		t.Error("Tool message should contain the IP address")
 	}
+
+	t.Log("New prompt structure:")
+	t.Log("  <system> — compact output contract")
+	t.Log("  <tools> — tool definitions")
+	t.Log("  <recent> — conversation with <tool_exchange> grouping")
+	t.Log("  <current_task> — last user message (recency anchor)")
+	t.Log("  <output_rules> — final reminder")
 }

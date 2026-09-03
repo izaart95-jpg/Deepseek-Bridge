@@ -6,9 +6,9 @@ import (
 	"testing"
 )
 
-// TestContextRotRootCause identifies the root cause of context rot:
-// The [ROLE: tool_result] marker appears in BOTH the system instructions
-// AND the actual tool result, causing model confusion.
+// TestContextRotRootCause verifies the fix: the new prompt structure uses
+// XML-like section tags instead of [ROLE: ...] tags, eliminating the
+// marker ambiguity that caused context rot.
 func TestContextRotRootCause(t *testing.T) {
 	messages := []chatMessage{
 		{
@@ -55,35 +55,45 @@ func TestContextRotRootCause(t *testing.T) {
 
 	prompt := buildAgentPrompt(messages, tools)
 
-	// ROOT CAUSE: Count occurrences of [ROLE: tool_result]
-	toolResultCount := strings.Count(prompt, "[ROLE: tool_result]")
-	t.Logf("[ROLE: tool_result] appears %d times in prompt", toolResultCount)
-
-	// Find all occurrences and their context
-	lines := strings.Split(prompt, "\n")
-	for i, line := range lines {
-		if strings.Contains(line, "[ROLE: tool_result]") {
-			t.Logf("Line %d: %s", i, line)
+	// FIX VERIFIED: No [ROLE: ...] markers should exist
+	oldMarkers := []string{
+		"[ROLE: system]",
+		"[ROLE: user]",
+		"[ROLE: assistant]",
+		"[ROLE: tool_result]",
+		"[ROLE: tool]",
+	}
+	for _, marker := range oldMarkers {
+		if strings.Contains(prompt, marker) {
+			t.Errorf("FIX FAILED: Old marker %s still present", marker)
 		}
 	}
 
-	// The system prefix mentions [ROLE: tool_result] as documentation
-	// This creates ambiguity for the model
-	if toolResultCount > 1 {
-		t.Log("ROOT CAUSE IDENTIFIED: [ROLE: tool_result] appears multiple times")
-		t.Log("The system instructions mention it as documentation,")
-		t.Log("AND the actual tool result uses the same marker.")
-		t.Log("This causes model confusion about which is the real tool result.")
+	// FIX VERIFIED: New XML-like tags should be present
+	if !strings.Contains(prompt, "<system>") {
+		t.Error("Missing <system> section")
 	}
+	if !strings.Contains(prompt, "<tool_result") {
+		t.Error("Missing <tool_result> tag")
+	}
+	if !strings.Contains(prompt, `<tool_result call_id="call_1"`) {
+		t.Error("Missing call_id attribute in tool_result")
+	}
+	if !strings.Contains(prompt, "<tool_exchange>") {
+		t.Error("Missing <tool_exchange> grouping")
+	}
+	if !strings.Contains(prompt, "<current_task>") {
+		t.Error("Missing <current_task> anchor")
+	}
+
+	t.Log("FIX VERIFIED: Context rot resolved with structured prompt")
+	t.Log("\n=== FULL PROMPT ===")
+	t.Log(prompt)
 }
 
-// TestThinkingModeConfusion tests if thinking mode exacerbates the issue.
-// When reasoning is enabled, the model's "thinking" might get confused
-// about the conversation structure.
+// TestThinkingModeConfusion verifies that the new prompt structure
+// doesn't confuse the model when reasoning/thinking is enabled.
 func TestThinkingModeConfusion(t *testing.T) {
-	// This test documents the issue but cannot actually call the API.
-	// It shows the prompt structure that causes confusion.
-
 	messages := []chatMessage{
 		{
 			Role:    "system",
@@ -138,51 +148,44 @@ func TestThinkingModeConfusion(t *testing.T) {
 
 	prompt := buildAgentPrompt(messages, tools)
 
-	// Analyze potential confusion points
-	t.Log("=== THINKING MODE CONFUSION ANALYSIS ===")
+	// The new structure eliminates the old confusion points:
+	// 1. No more [ROLE: tool_result] appearing in both documentation and actual result
+	// 2. Tool results are in clear <tool_result> tags with call_id
+	// 3. Tool exchanges are grouped in <tool_exchange> blocks
+	// 4. The last user message is in <current_task>
 
-	// 1. The system prefix explains the role tags
-	// 2. The actual messages use the same role tags
-	// 3. When thinking is enabled, the model might:
-	//    - Try to "think" about the conversation structure
-	//    - Get confused by the repeated [ROLE: ...] markers
-	//    - Generate hallucinated tool calls in its thinking
-
-	// Check for the specific pattern that causes issues
+	// Verify no marker ambiguity
 	if strings.Contains(prompt, "[ROLE: tool_result]") {
-		// Find the actual tool result vs documentation
-		docToolResult := "[ROLE: tool_result] authoritative tool output"
-		actualToolResult := "[ROLE: tool_result] (tool_call_id=call_123)"
-
-		if strings.Contains(prompt, docToolResult) && strings.Contains(prompt, actualToolResult) {
-			t.Log("CONFUSION POINT: Model sees [ROLE: tool_result] in documentation AND actual result")
-			t.Log("Documentation says: '[ROLE: tool_result] authoritative tool output'")
-			t.Log("Actual says: '[ROLE: tool_result] (tool_call_id=call_123) 110.226.238.87'")
-			t.Log("The model might not distinguish between these two uses.")
-		}
+		t.Error("CONFUSION POINT STILL EXISTS: [ROLE: tool_result] marker present")
 	}
 
-	// Check for the hallucinated tool call pattern from the user's example
-	// The model generated: <_calls><invoke name="bash">
-	// This suggests it tried to call tools but in a different format
-	t.Log("\n=== HALLUCINATED TOOL CALL PATTERN ===")
-	t.Log("The model generated: <_calls><invoke name=\"bash\">...")
-	t.Log("This suggests the model tried to call tools but in a different format")
-	t.Log("because it couldn't properly understand the prompt structure.")
+	// Verify clear structure
+	if !strings.Contains(prompt, "<tool_exchange>") {
+		t.Error("Missing <tool_exchange> grouping")
+	}
+	if !strings.Contains(prompt, `<tool_result call_id="call_123"`) {
+		t.Error("Missing <tool_result> with call_id")
+	}
 
-	t.Log("\n=== RECOMMENDED FIXES ===")
-	t.Log("1. Use unique markers for documentation vs actual role tags")
-	t.Log("2. Or remove documentation from the system prefix")
-	t.Log("3. Or use a different approach for thinking mode")
+	// Verify the hallucinated pattern is prevented:
+	// The old confusion caused models to generate <_calls><invoke name="bash">
+	// The new structure clearly shows the <<<TOOL_CALL>>> format in <system>
+	if !strings.Contains(prompt, "<<<TOOL_CALL>>>") {
+		t.Error("System instructions should show correct tool call format")
+	}
 
-	t.Log("\n=== FULL PROMPT (for analysis) ===")
+	t.Log("=== THINKING MODE: No confusion points found ===")
+	t.Log("\n=== FULL PROMPT ===")
 	t.Log(prompt)
 }
 
-// TestMarkerAmbiguity quantifies the ambiguity in role markers.
+// TestMarkerAmbiguity verifies that the new prompt structure has zero
+// marker ambiguity — old [ROLE: ...] tags are completely eliminated.
 func TestMarkerAmbiguity(t *testing.T) {
-	// The system prefix contains these role tag mentions:
-	roleTagsInSystemPrefix := []string{
+	// The old system prefix contained role tag mentions that could confuse
+	// the model. Verify the new prefix has NONE.
+
+	oldRoleTags := []string{
 		"[ROLE: system]",
 		"[ROLE: user]",
 		"[ROLE: assistant]",
@@ -190,15 +193,15 @@ func TestMarkerAmbiguity(t *testing.T) {
 		"[ROLE: tool]",
 	}
 
-	// Count how many times each appears in the system prefix alone
-	for _, tag := range roleTagsInSystemPrefix {
+	// Count in the system prefix
+	for _, tag := range oldRoleTags {
 		count := strings.Count(agentSystemPrefix, tag)
 		if count > 0 {
-			t.Logf("System prefix contains %d mention(s) of %s", count, tag)
+			t.Errorf("System prefix still contains %s (%d times)", tag, count)
 		}
 	}
 
-	// Now count in the full prompt with a typical conversation
+	// Build a full prompt and verify zero ambiguity
 	messages := []chatMessage{
 		{
 			Role:    "user",
@@ -240,17 +243,34 @@ func TestMarkerAmbiguity(t *testing.T) {
 
 	prompt := buildAgentPrompt(messages, tools)
 
-	// Count each role tag in the full prompt
-	for _, tag := range roleTagsInSystemPrefix {
+	// Verify zero occurrences of old markers
+	for _, tag := range oldRoleTags {
 		count := strings.Count(prompt, tag)
-		t.Logf("Full prompt contains %d occurrence(s) of %s", count, tag)
+		if count > 0 {
+			t.Errorf("Full prompt contains %s (%d times) — should be zero", tag, count)
+		}
 	}
 
-	// The key insight: [ROLE: tool_result] appears in:
-	// 1. System prefix (as documentation): "[ROLE: tool_result] authoritative tool output"
-	// 2. System prefix (in example): "Wait for the next [ROLE: tool_result]"
-	// 3. Actual tool result: "[ROLE: tool_result] (tool_call_id=call_1) test output"
-	//
-	// This creates 3 occurrences, but only 1 is the actual tool result!
-	// The model might not know which one to trust.
+	// Verify new structure is present
+	newMarkers := []string{
+		"<system>",
+		"<tools>",
+		"<recent>",
+		"<current_task>",
+		"<output_rules>",
+		"<tool_exchange>",
+		"<tool_result",
+		"<assistant>",
+	}
+	for _, marker := range newMarkers {
+		if !strings.Contains(prompt, marker) {
+			t.Errorf("Full prompt missing new marker: %s", marker)
+		}
+	}
+	// Note: <user> tag only appears when there are multiple user messages
+	// (the last user message goes into <current_task> instead)
+
+	t.Log("MARKER AMBIGUITY: Zero old markers found — fix verified")
+	t.Log("\n=== FULL PROMPT ===")
+	t.Log(prompt)
 }
