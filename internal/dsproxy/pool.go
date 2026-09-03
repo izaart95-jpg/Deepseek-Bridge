@@ -15,7 +15,7 @@ import (
 // The synchronous flow creates one per request, so public traffic pays a
 // session-creation round trip before any model output starts. The session
 // pool removes that cost: it keeps a standing batch of ready sessions
-// (default 3) created ahead of time, hands them out instantly, and the
+// (default 12) created ahead of time, hands them out instantly, and the
 // moment a request's response has been fully written and processed, the
 // consumed session is deleted upstream and a replacement is created to
 // refill the batch — so the account never accumulates garbage and the
@@ -35,7 +35,7 @@ var (
 
 const (
 	// defaultPoolSize is the standing batch of pre-made ready sessions.
-	defaultPoolSize = 3
+	defaultPoolSize = 12
 	// defaultPoolWait bounds how long a completion request waits for a
 	// pooled session before creating one directly (see SESSION_ACQUIRE_TIMEOUT).
 	defaultPoolWait = 10 * time.Second

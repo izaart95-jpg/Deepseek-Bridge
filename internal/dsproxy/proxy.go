@@ -530,8 +530,19 @@ func (s *ProxyServer) streamResponse(w http.ResponseWriter, r *http.Request, api
 	}
 
 	if interceptor != nil {
-		if trailing := interceptor.Flush(); trailing != "" {
-			sse(contentChunk(trailing, nil))
+		final := interceptor.Finish()
+		if final.Content != "" && !sse(contentChunk(final.Content, nil)) {
+			return
+		}
+		for _, call := range final.ToolCalls {
+			emittedToolCall = true
+			debugf("agent tool call #%d: %s(%s) [final]", call["index"], call["function"].(map[string]any)["name"], call["function"].(map[string]any)["arguments"])
+			if !sse(map[string]any{
+				"id": rid, "object": "chat.completion.chunk", "created": created, "model": model,
+				"choices": []any{map[string]any{"index": 0, "delta": map[string]any{"tool_calls": []any{call}}, "finish_reason": nil}},
+			}) {
+				return
+			}
 		}
 	}
 

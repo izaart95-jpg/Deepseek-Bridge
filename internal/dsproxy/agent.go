@@ -20,6 +20,116 @@ import (
 const agentToolStart = "<<<TOOL_CALL>>>"
 const agentToolEnd = "<<<END_TOOL_CALL>>>"
 
+// ── marker tolerance ─────────────────────────────────────────────────────────
+// Models occasionally miscount the angle brackets framing the markers —
+// observed in the wild with deepseek-v4-pro emitting "<<TOOL_CALL>>>" (two
+// leading '<') while producing a well-formed "<<<END_TOOL_CALL>>>". An
+// exact-literal matcher silently misses such blocks and the whole tool call
+// leaks to the client as plain content. Both markers are therefore matched
+// with a bracket run of 2..4 on each side; emission above stays canonical.
+const (
+	agentStartWord   = "TOOL_CALL"
+	agentEndWord     = "END_TOOL_CALL"
+	agentMinBrackets = 2
+	agentMaxBrackets = 4
+)
+
+// agentWorstMarkerLen is the longest accepted spelling ("<<<<TOOL_CALL>>>>").
+const agentWorstMarkerLen = 2*agentMaxBrackets + len(agentStartWord)
+
+// bracketRunBack counts the run of b bytes ending immediately before s[i].
+func bracketRunBack(s string, i int, b byte) int {
+	n := 0
+	for i-n-1 >= 0 && s[i-n-1] == b {
+		n++
+	}
+	return n
+}
+
+// bracketRunForward counts the run of b bytes starting at s[0].
+func bracketRunForward(s string, b byte) int {
+	n := 0
+	for n < len(s) && s[n] == b {
+		n++
+	}
+	return n
+}
+
+// Sentinel results for findAgentMarker.
+const (
+	markerNone       = -1 // no framed occurrence of word in s
+	markerIncomplete = -2 // a candidate needs more bytes before it can match
+)
+
+// findAgentMarker locates the first occurrence of word framed by 2..4 '<'
+// immediately before and 2..4 '>' immediately after. It returns the index of
+// the first bracket and the full marker length, or markerNone /
+// markerIncomplete. Occurrences not so framed (the TOOL_CALL inside an END
+// marker, prose, code) are skipped.
+//
+// Streaming correctness: a trailing '>' run that reaches the end of s has no
+// terminating byte yet, so the run may still grow — with final=false that is
+// reported as markerIncomplete instead of matching short (which would leak
+// the missing brackets as content) or rejecting outright. With final=true
+// (finished text) an end-of-string run is taken as is.
+func findAgentMarker(s, word string, final bool) (int, int) {
+	for from := 0; ; {
+		j := strings.Index(s[from:], word)
+		if j < 0 {
+			return markerNone, 0
+		}
+		w := from + j
+		lead := bracketRunBack(s, w, '<')
+		if lead < agentMinBrackets || lead > agentMaxBrackets {
+			from = w + len(word)
+			continue
+		}
+		after := s[w+len(word):]
+		trail := bracketRunForward(after, '>')
+		switch {
+		case trail > agentMaxBrackets:
+			// Definitively over-long; more bytes cannot shrink the run.
+		case trail == len(after) && !final:
+			// The '>' run touches the end of the available data and may
+			// still grow past min/max — wait for a terminating byte.
+			return markerIncomplete, 0
+		case trail >= agentMinBrackets:
+			return w - lead, lead + len(word) + trail
+		}
+		from = w + len(word)
+	}
+}
+
+// agentSpan marks one complete tool-call block in finished text:
+// [start,end) covers both markers, [bodyStart,bodyEnd) the JSON between them.
+type agentSpan struct {
+	start, bodyStart, bodyEnd, end int
+}
+
+// findAgentSpans walks every complete tolerant tool-call block in text.
+// An unterminated opening marker is ignored, matching the old literal scan.
+func findAgentSpans(text string) []agentSpan {
+	var spans []agentSpan
+	for pos := 0; ; {
+		s, slen := findAgentMarker(text[pos:], agentStartWord, true)
+		if s < 0 {
+			return spans
+		}
+		bodyStart := pos + s + slen
+		e, elen := findAgentMarker(text[bodyStart:], agentEndWord, true)
+		if e < 0 {
+			return spans
+		}
+		spans = append(spans, agentSpan{
+			start:     pos + s,
+			bodyStart: bodyStart,
+			bodyEnd:   bodyStart + e,
+			end:       bodyStart + e + elen,
+		})
+		pos = bodyStart + e + elen
+	}
+}
+
 const agentSystemPrefix = `[SYSTEM] — AGENT MODE OUTPUT CONTRACT (READ FULLY, OBEY STRICTLY)
 
 You act through a compatibility shim. Each incoming message carries a [ROLE: …] tag:
@@ -239,7 +349,6 @@ func buildAgentPrompt(messages []chatMessage, tools []openAITool) string {
 // ── response parsing ─────────────────────────────────────────────────────────
 
 var (
-	agentCallRe    = regexp.MustCompile(`(?s)<<<TOOL_CALL>>>\s*(.*?)\s*<<<END_TOOL_CALL>>>`)
 	agentFenceLead = regexp.MustCompile(`(?i)^` + "```" + `(?:json)?\s*`)
 	agentFenceTail = regexp.MustCompile(`(?i)\s*` + "```" + `$`)
 )
@@ -249,11 +358,16 @@ var (
 // not to. These helpers strip fence lines sitting DIRECTLY against the
 // markers (never ordinary code blocks elsewhere in the answer).
 
+// Tolerant bracket runs around both markers, e.g. "<<TOOL_CALL>>>" or
+// "<<<END_TOOL_CALL>>>" as well as the canonical spellings.
+const agentMarkerPat = "(?:<{2,4})TOOL_CALL(?:>{2,4})"
+const agentEndMarkerPat = "(?:<{2,4})END_TOOL_CALL(?:>{2,4})"
+
 var (
-	// fence line immediately before <<<TOOL_CALL>>>
-	agentFenceBeforeCallRe = regexp.MustCompile("(?:\\A|\r?\n)[ \t]*```(?:json)?[ \t]*\r?\n(" + regexp.QuoteMeta(agentToolStart) + ")")
-	// fence line right after <<<END_TOOL_CALL>>> (keeps the newline that follows)
-	agentFenceAfterEndRe = regexp.MustCompile("(" + regexp.QuoteMeta(agentToolEnd) + ")[ \t]*\r?\n[ \t]*```(?:json)?[ \t]*((?:\r?\n)?)")
+	// fence line immediately before a tool-call opening marker
+	agentFenceBeforeCallRe = regexp.MustCompile("(?:\\A|\r?\n)[ \t]*```(?:json)?[ \t]*\r?\n(" + agentMarkerPat + ")")
+	// fence line right after a tool-call closing marker (keeps the newline that follows)
+	agentFenceAfterEndRe = regexp.MustCompile("(" + agentEndMarkerPat + ")[ \t]*\r?\n[ \t]*```(?:json)?[ \t]*((?:\r?\n)?)")
 	// bare fence line hanging at the very end of a streamed content piece
 	agentTrailFenceRe = regexp.MustCompile("(?:\\A|\r?\n)[ \t]*```(?:json)?[ \t]*(?:\r?\n)?\\z")
 )
@@ -262,8 +376,9 @@ const agentFenceJSON = "```json"
 
 // agentStreamKeep is how many trailing bytes the streaming interceptor keeps
 // un-flushed while no marker has matched: enough to cover a fence line plus a
-// partially received marker, so neither can ever leak as content.
-const agentStreamKeep = len(agentToolStart) + len(agentFenceJSON) + 6
+// partially received marker at its worst tolerated spelling, so neither can
+// ever leak as content.
+const agentStreamKeep = agentWorstMarkerLen + len("```json\n") + 5
 
 // NormalizeAgentFences removes fence lines adjacent to tool-call markers from
 // finished text (non-streaming path).
@@ -397,8 +512,8 @@ func agentStreamArguments(raw json.RawMessage) string {
 func ParseAgentToolCalls(text string) []map[string]any {
 	text = NormalizeAgentFences(text)
 	var calls []map[string]any
-	for _, match := range agentCallRe.FindAllStringSubmatch(text, -1) {
-		name, args, ok := agentLooseParse(match[1])
+	for _, span := range findAgentSpans(text) {
+		name, args, ok := agentLooseParse(text[span.bodyStart:span.bodyEnd])
 		if !ok || name == "" {
 			continue
 		}
@@ -417,8 +532,14 @@ func ParseAgentToolCalls(text string) []map[string]any {
 // StripAgentToolCalls removes all tool-call blocks from finished text.
 func StripAgentToolCalls(text string) string {
 	text = NormalizeAgentFences(text)
-	stripped := agentCallRe.ReplaceAllString(text, "")
-	return strings.TrimSpace(stripped)
+	var kept strings.Builder
+	prev := 0
+	for _, span := range findAgentSpans(text) {
+		kept.WriteString(text[prev:span.start])
+		prev = span.end
+	}
+	kept.WriteString(text[prev:])
+	return strings.TrimSpace(kept.String())
 }
 
 // ── streaming interceptor ────────────────────────────────────────────────────
@@ -440,6 +561,20 @@ type AgentParsedChunk struct {
 
 func (in *AgentStreamInterceptor) Feed(chunk string) AgentParsedChunk {
 	in.buffer += chunk
+	return in.drain(false)
+}
+
+// Finish drains the interceptor at end of upstream stream, treating the
+// buffered tail as complete data: a marker whose trailing '>' run touches the
+// very end can now match, and whatever remains unparsed is ordinary content.
+// Tool calls discovered here must still be forwarded to the client.
+func (in *AgentStreamInterceptor) Finish() AgentParsedChunk {
+	parsed := in.drain(true)
+	in.offset = len(in.buffer)
+	return parsed
+}
+
+func (in *AgentStreamInterceptor) drain(final bool) AgentParsedChunk {
 	var content []string
 	var toolCalls []map[string]any
 
@@ -459,17 +594,27 @@ func (in *AgentStreamInterceptor) Feed(chunk string) AgentParsedChunk {
 				}
 				in.offset += n
 			}
-			if agentPossibleFencePrefix(in.buffer[in.offset:]) {
+			if agentPossibleFencePrefix(in.buffer[in.offset:]) && !final {
 				break // could still become a fence; wait for more chunks
 			}
 			in.pendingSep = false
 		}
 
 		rest := in.buffer[in.offset:]
-		start := strings.Index(rest, agentToolStart)
+		start, markerLen := findAgentMarker(rest, agentStartWord, final)
 		if start < 0 {
+			if final {
+				// End of data: everything left is ordinary content.
+				if rest != "" {
+					content = append(content, rest)
+					in.offset = len(in.buffer)
+				}
+				break
+			}
 			// Hold back a window big enough for a fence line + partial marker
-			// so neither can leak as content while split across chunks.
+			// so neither can leak as content while split across chunks. A
+			// marker reported incomplete keeps its bytes inside this window,
+			// so nothing here can be part of a future match.
 			const keep = agentStreamKeep
 			if len(rest) > keep {
 				content = append(content, rest[:len(rest)-keep])
@@ -484,8 +629,8 @@ func (in *AgentStreamInterceptor) Feed(chunk string) AgentParsedChunk {
 			}
 			in.offset += start
 		}
-		bodyStart := in.offset + len(agentToolStart)
-		idx := strings.Index(in.buffer[bodyStart:], agentToolEnd)
+		bodyStart := in.offset + markerLen
+		idx, endMarkerLen := findAgentMarker(in.buffer[bodyStart:], agentEndWord, final)
 		if idx < 0 {
 			break // incomplete block: wait for more chunks
 		}
@@ -504,18 +649,12 @@ func (in *AgentStreamInterceptor) Feed(chunk string) AgentParsedChunk {
 			in.callIndex++
 		} else {
 			// invalid model block: leave it as visible text
-			content = append(content, in.buffer[in.offset:end+len(agentToolEnd)])
+			content = append(content, in.buffer[in.offset:end+endMarkerLen])
 		}
-		in.offset = end + len(agentToolEnd)
+		in.offset = end + endMarkerLen
 		in.pendingSep = true // watch for a ``` fence right after the block
 	}
 	return AgentParsedChunk{Content: strings.Join(content, ""), ToolCalls: toolCalls}
-}
-
-func (in *AgentStreamInterceptor) Flush() string {
-	rest := in.buffer[in.offset:]
-	in.offset = len(in.buffer)
-	return rest
 }
 
 func isASCIISpace(b byte) bool {
