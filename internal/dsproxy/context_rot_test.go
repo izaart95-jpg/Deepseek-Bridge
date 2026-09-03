@@ -9,10 +9,9 @@ import (
 // TestContextRotHypothesis tests whether the agent mode properly handles
 // tool results when reasoning/thinking is enabled.
 //
-// The hypothesis is that since all messages (system prompt, user messages,
-// tool calls, tool results) are combined into a single prompt string in
-// agent mode, the model might not properly distinguish between different
-// sections, especially tool_results, leading to hallucinated tool calls.
+// The new prompt structure uses XML-like section tags (<tool_result>,
+// <tool_exchange>, <current_task>) instead of [ROLE: ...] tags, which
+// eliminates marker ambiguity and gives the model clear structure.
 func TestContextRotHypothesis(t *testing.T) {
 	// Simulate a conversation where:
 	// 1. User asks for public IP
@@ -80,15 +79,14 @@ func TestContextRotHypothesis(t *testing.T) {
 	t.Log("Generated agent prompt:")
 	t.Log(prompt)
 
-	// Check that tool results are properly marked with <<TOOL_RESULT>>
-	// (not [ROLE: tool_result] which causes marker ambiguity)
-	if !strings.Contains(prompt, "<<TOOL_RESULT>>") {
-		t.Error("Prompt should contain <<TOOL_RESULT>> marker")
+	// Check that tool results use the new <tool_result> XML tag
+	if !strings.Contains(prompt, "<tool_result") {
+		t.Error("Prompt should contain <tool_result> tag")
 	}
 
-	// Check that tool_call_id is present
-	if !strings.Contains(prompt, "tool_call_id=call_123") {
-		t.Error("Prompt should contain tool_call_id")
+	// Check that call_id is present in the tool_result tag
+	if !strings.Contains(prompt, `call_id="call_123"`) {
+		t.Error("Prompt should contain call_id attribute in tool_result")
 	}
 
 	// Check that assistant's tool call is rendered
@@ -96,16 +94,31 @@ func TestContextRotHypothesis(t *testing.T) {
 		t.Error("Prompt should contain <<<TOOL_CALL>>> from assistant message")
 	}
 
-	// Check that the final user message is present
+	// Check that the current_task section contains the last user message
+	if !strings.Contains(prompt, "<current_task>") {
+		t.Error("Prompt should have <current_task> section")
+	}
 	if !strings.Contains(prompt, "find my os arch") {
-		t.Error("Prompt should contain the final user message")
+		t.Error("Prompt should contain the final user message in <current_task>")
 	}
 
-	// The key issue: when reasoning is enabled, does the model understand
-	// that the tool_result contains the actual IP address?
-	// Let's check if the tool result content is visible in the prompt
+	// The key improvement: tool results are in <tool_result> tags, clearly
+	// separated from assistant messages in <tool_exchange> blocks
+	if !strings.Contains(prompt, "<tool_exchange>") {
+		t.Error("Prompt should group tool calls with results in <tool_exchange>")
+	}
+
+	// Check that the tool result content is visible in the prompt
 	if !strings.Contains(prompt, "110.226.238.87") {
 		t.Error("Prompt should contain the tool result content (IP address)")
+	}
+
+	// Verify the new structure: no [ROLE: ...] tags
+	roleMarkers := []string{"[ROLE: system]", "[ROLE: user]", "[ROLE: assistant]"}
+	for _, marker := range roleMarkers {
+		if strings.Contains(prompt, marker) {
+			t.Errorf("Prompt should not contain old %s marker", marker)
+		}
 	}
 }
 
@@ -153,21 +166,17 @@ func TestToolResultVisibility(t *testing.T) {
 
 	prompt := buildAgentPrompt(messages, tools)
 
-	// Verify tool result is clearly marked with <<TOOL_RESULT>> and visible
-	lines := strings.Split(prompt, "\n")
-	toolResultFound := false
-	for _, line := range lines {
-		if strings.Contains(line, "<<TOOL_RESULT>>") {
-			toolResultFound = true
-			// Check the tool result is on the same line or nearby
-			if !strings.Contains(line, "192.168.1.100") {
-				t.Errorf("Tool result content should be visible near <<TOOL_RESULT>>, got: %s", line)
-			}
-		}
+	// Verify tool result is in a <tool_result> tag and content is visible
+	if !strings.Contains(prompt, "<tool_result") {
+		t.Error("No <tool_result> tag found in prompt")
+	}
+	if !strings.Contains(prompt, "192.168.1.100") {
+		t.Error("Tool result content (IP) not visible in prompt")
 	}
 
-	if !toolResultFound {
-		t.Error("No <<TOOL_RESULT>> found in prompt")
+	// Verify the tool exchange grouping
+	if !strings.Contains(prompt, "<tool_exchange>") {
+		t.Error("Tool calls and results should be grouped in <tool_exchange>")
 	}
 
 	t.Log("Prompt with tool result:")
@@ -175,7 +184,7 @@ func TestToolResultVisibility(t *testing.T) {
 }
 
 // TestMultipleToolResults verifies that multiple tool results are properly
-// distinguished in the prompt.
+// distinguished in the prompt with call_id attributes.
 func TestMultipleToolResults(t *testing.T) {
 	messages := []chatMessage{
 		{
@@ -234,12 +243,12 @@ func TestMultipleToolResults(t *testing.T) {
 
 	prompt := buildAgentPrompt(messages, tools)
 
-	// Verify both tool results are present with correct IDs
-	if !strings.Contains(prompt, "tool_call_id=call_1") {
-		t.Error("Missing tool_call_id=call_1")
+	// Verify both tool results are present with correct call_id attributes
+	if !strings.Contains(prompt, `call_id="call_1"`) {
+		t.Error("Missing call_id=\"call_1\" in tool_result tag")
 	}
-	if !strings.Contains(prompt, "tool_call_id=call_2") {
-		t.Error("Missing tool_call_id=call_2")
+	if !strings.Contains(prompt, `call_id="call_2"`) {
+		t.Error("Missing call_id=\"call_2\" in tool_result tag")
 	}
 
 	// Verify both tool result contents are present
@@ -250,12 +259,17 @@ func TestMultipleToolResults(t *testing.T) {
 		t.Error("Missing second tool result content")
 	}
 
+	// Verify tool exchange grouping
+	if !strings.Contains(prompt, "<tool_exchange>") {
+		t.Error("Tool calls should be grouped in <tool_exchange>")
+	}
+
 	t.Log("Prompt with multiple tool results:")
 	t.Log(prompt)
 }
 
-// TestPromptStructureAnalysis analyzes the prompt structure to identify
-// potential issues with model understanding.
+// TestPromptStructureAnalysis analyzes the new prompt structure and verifies
+// it addresses the context rot issues.
 func TestPromptStructureAnalysis(t *testing.T) {
 	messages := []chatMessage{
 		{
@@ -310,43 +324,55 @@ func TestPromptStructureAnalysis(t *testing.T) {
 
 	prompt := buildAgentPrompt(messages, tools)
 
-	// Analyze the prompt structure
-	t.Log("=== PROMPT STRUCTURE ANALYSIS ===")
+	// Analyze the NEW prompt structure
+	t.Log("=== NEW PROMPT STRUCTURE ANALYSIS ===")
 
-	// Check for role markers
-	roleMarkers := []string{
+	// Verify the new XML-like section tags are present
+	sections := []string{
+		"<system>",
+		"<tools>",
+		"<recent>",
+		"<current_task>",
+		"<output_rules>",
+	}
+	for _, section := range sections {
+		if !strings.Contains(prompt, section) {
+			t.Errorf("Prompt missing section: %s", section)
+		}
+	}
+
+	// Verify tool exchange grouping
+	if !strings.Contains(prompt, "<tool_exchange>") {
+		t.Error("Missing <tool_exchange> for grouped tool calls")
+	}
+	if !strings.Contains(prompt, "</tool_exchange>") {
+		t.Error("Missing closing </tool_exchange>")
+	}
+
+	// Verify tool_result has call_id
+	if !strings.Contains(prompt, `<tool_result call_id="call_ip"`) {
+		t.Error("Missing <tool_result> with call_id")
+	}
+
+	// Check for OLD format markers (should NOT be present)
+	oldMarkers := []string{
 		"[ROLE: system]",
 		"[ROLE: user]",
 		"[ROLE: assistant]",
 		"[ROLE: tool_result]",
+		"<<TOOL_RESULT>>",
+		"[TOOL CONTRACT]",
 	}
-
-	for _, marker := range roleMarkers {
-		count := strings.Count(prompt, marker)
-		t.Logf("%s: %d occurrences", marker, count)
-	}
-
-	// Check for potential confusion points
-	t.Log("\n=== POTENTIAL CONFUSION POINTS ===")
-
-	// 1. Check if tool result is near assistant message
-	toolResultIdx := strings.Index(prompt, "<<TOOL_RESULT>>")
-	if toolResultIdx >= 0 {
-		assistantAfterToolIdx := strings.Index(prompt[toolResultIdx:], "[ROLE: assistant]")
-		if assistantAfterToolIdx > 0 && assistantAfterToolIdx < 100 {
-			t.Log("WARNING: Tool result is very close to next assistant message")
+	for _, marker := range oldMarkers {
+		if strings.Contains(prompt, marker) {
+			t.Errorf("Prompt should NOT contain old format marker: %s", marker)
 		}
 	}
 
-	// 2. Check for overlapping content
-	if strings.Contains(prompt, "203.0.113.42") && strings.Contains(prompt, "find my OS") {
-		t.Log("INFO: Both tool result and new user request are in prompt")
-	}
-
-	// 3. Check prompt length
+	// Check prompt length
 	t.Logf("Prompt length: %d characters", len(prompt))
 
-	// 4. Check for clear separation between sections
+	// Check for clear separation between sections
 	lines := strings.Split(prompt, "\n")
 	emptyLineCount := 0
 	for _, line := range lines {
