@@ -1,5 +1,10 @@
-curl-cffi==0.8.1b9
+curl-cffi
 wasmtime
 numpy
 nodriver
 drissionpage
+setuptools
+uvicorn
+fastapi
+python-dotenv
+requests
