@@ -1,8 +1,10 @@
-package main
+package tests
 
 import (
 	"strings"
 	"testing"
+
+	"deepseek/internal/dsproxy"
 )
 
 func TestTrimTrailingAgentFence(t *testing.T) {
@@ -13,23 +15,23 @@ func TestTrimTrailingAgentFence(t *testing.T) {
 		{"hello ```bash\nx=1", "hello ```bash\nx=1"}, // real code block untouched
 	}
 	for _, c := range cases {
-		if got := trimTrailingAgentFence(c.in); got != c.want {
+		if got := dsproxy.TrimTrailingAgentFence(c.in); got != c.want {
 			t.Errorf("trim(%q)=%q want %q", c.in, got, c.want)
 		}
 	}
 }
 
 func TestSkipLeadingAgentFence(t *testing.T) {
-	if n := skipLeadingAgentFence("```\nrest"); n != 4 {
+	if n := dsproxy.SkipLeadingAgentFence("```\nrest"); n != 4 {
 		t.Errorf("bare fence: got %d", n)
 	}
-	if n := skipLeadingAgentFence("```json\ntext"); n != 8 {
+	if n := dsproxy.SkipLeadingAgentFence("```json\ntext"); n != 8 {
 		t.Errorf("json fence: got %d", n)
 	}
-	if n := skipLeadingAgentFence("```python\nx"); n != 0 {
+	if n := dsproxy.SkipLeadingAgentFence("```python\nx"); n != 0 {
 		t.Errorf("lang fence must not match: got %d", n)
 	}
-	if n := skipLeadingAgentFence("text"); n != 0 {
+	if n := dsproxy.SkipLeadingAgentFence("text"); n != 0 {
 		t.Errorf("text: got %d", n)
 	}
 }
@@ -37,14 +39,14 @@ func TestSkipLeadingAgentFence(t *testing.T) {
 func TestNormalizeAgentFences(t *testing.T) {
 	in := "```json\n<<<TOOL_CALL>>>\n{\"name\":\"bash\",\"arguments\":{}}\n<<<END_TOOL_CALL>>>\n```\ndone"
 	want := "<<<TOOL_CALL>>>\n{\"name\":\"bash\",\"arguments\":{}}\n<<<END_TOOL_CALL>>>\ndone"
-	if got := normalizeAgentFences(in); got != want {
+	if got := dsproxy.NormalizeAgentFences(in); got != want {
 		t.Errorf("normalize:\n got %q\nwant %q", got, want)
 	}
 }
 
 func TestInterceptorSwallowsFencesAcrossChunks(t *testing.T) {
 	stream := "Let me check your architecture.\n\n```json\n<<<TOOL_CALL>>>\n{\"name\":\"bash\",\"arguments\":{\"command\":\"uname -m\"}}\n<<<END_TOOL_CALL>>>\n```\ntrailing note"
-	in := &agentStreamInterceptor{}
+	in := &dsproxy.AgentStreamInterceptor{}
 	var content strings.Builder
 	var calls int
 	for i := 0; i < len(stream); i += 3 { // nasty 3-byte chunking
@@ -52,11 +54,11 @@ func TestInterceptorSwallowsFencesAcrossChunks(t *testing.T) {
 		if end > len(stream) {
 			end = len(stream)
 		}
-		parsed := in.feed(stream[i:end])
-		content.WriteString(parsed.content)
-		calls += len(parsed.toolCalls)
+		parsed := in.Feed(stream[i:end])
+		content.WriteString(parsed.Content)
+		calls += len(parsed.ToolCalls)
 	}
-	content.WriteString(in.flush())
+	content.WriteString(in.Flush())
 	out := content.String()
 	if calls != 1 {
 		t.Errorf("expected 1 tool call, got %d", calls)
@@ -71,11 +73,11 @@ func TestInterceptorSwallowsFencesAcrossChunks(t *testing.T) {
 
 func TestNonStreamParseStripWithFences(t *testing.T) {
 	text := "Sure!\n```json\n<<<TOOL_CALL>>>\n{\"name\":\"bash\",\"arguments\":{\"command\":\"arch\"}}\n<<<END_TOOL_CALL>>>\n```\nRunning now."
-	calls := parseAgentToolCalls(text)
+	calls := dsproxy.ParseAgentToolCalls(text)
 	if len(calls) != 1 || calls[0]["function"].(map[string]any)["name"] != "bash" {
 		t.Fatalf("parse failed: %#v", calls)
 	}
-	if stripped := stripAgentToolCalls(text); strings.Contains(stripped, "```") || strings.Contains(stripped, "TOOL_CALL") {
+	if stripped := dsproxy.StripAgentToolCalls(text); strings.Contains(stripped, "```") || strings.Contains(stripped, "TOOL_CALL") {
 		t.Errorf("strip left junk: %q", stripped)
 	}
 }

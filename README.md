@@ -56,7 +56,7 @@ JSON.parse(localStorage.getItem("userToken")).value
 cp .env.example .env
 ```
 
-Edit `.env` with your token, or export it directly:
+Edit `.env` with your token. The proxy loads `.env` automatically at startup — first from its working directory, then from the directory next to the binary. Variables already present in the environment always win, so you can still export them directly:
 
 ```bash
 # Linux / macOS
@@ -142,7 +142,7 @@ curl -X POST http://localhost:3000/new \
 
 ### `POST /v1/chat/completions` — Chat completions (OpenAI format)
 
-Supports `deepseek-chat` and `deepseek-reasoner` models, with optional thinking and web search.
+Supports the `deepseek-chat` model with optional web search. Thinking mode stays **off** unless the request payload contains `"reasoning": {"enabled": true}` or a `"reasoning_effort"` value — the model name alone never enables it.
 
 **Non-streaming with thinking + search:**
 
@@ -151,24 +151,24 @@ curl -X POST http://localhost:3000/v1/chat/completions \
   -H "Authorization: Bearer Waguri-san" \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "deepseek-reasoner",
+    "model": "deepseek-chat",
     "messages": [{"role": "user", "content": "What is the latest news about AI?"}],
-    "thinking": true,
+    "reasoning": {"enabled": true},
     "search": true,
     "stream": false
   }'
 ```
 
-**Streaming with thinking + search:**
+**Streaming with thinking (via `reasoning_effort`):**
 
 ```bash
 curl -X POST http://localhost:3000/v1/chat/completions \
   -H "Authorization: Bearer Waguri-san" \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "deepseek-reasoner",
+    "model": "deepseek-chat",
     "messages": [{"role": "user", "content": "Explain quantum computing in simple terms"}],
-    "thinking": true,
+    "reasoning_effort": "high",
     "search": true,
     "stream": true
   }'
@@ -192,7 +192,6 @@ curl -X POST http://localhost:3000/v1/chat/completions \
   -d '{
     "model": "deepseek-chat",
     "messages": [{"role": "user", "content": "My name is John"}],
-    "thinking": false,
     "search": false,
     "stream": false
   }'
@@ -204,13 +203,22 @@ curl -X POST http://localhost:3000/v1/chat/completions \
   -d '{
     "model": "deepseek-chat",
     "messages": [{"role": "user", "content": "What is my name?"}],
-    "thinking": false,
     "search": false,
     "stream": false
   }'
 ```
 
 > The second request should return "John" — history is preserved across calls.
+
+---
+
+## Development
+
+The application lives in `internal/dsproxy` (`main.go` is a thin entry point); tests live in `tests/`:
+
+```bash
+go test ./...
+```
 
 ---
 

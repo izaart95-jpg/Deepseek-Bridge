@@ -1,4 +1,4 @@
-package main
+package dsproxy
 
 import (
 	"bufio"

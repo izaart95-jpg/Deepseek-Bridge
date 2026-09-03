@@ -1,4 +1,4 @@
-package main
+package dsproxy
 
 import (
 	"bytes"
@@ -265,9 +265,9 @@ const agentFenceJSON = "```json"
 // partially received marker, so neither can ever leak as content.
 const agentStreamKeep = len(agentToolStart) + len(agentFenceJSON) + 6
 
-// normalizeAgentFences removes fence lines adjacent to tool-call markers from
+// NormalizeAgentFences removes fence lines adjacent to tool-call markers from
 // finished text (non-streaming path).
-func normalizeAgentFences(text string) string {
+func NormalizeAgentFences(text string) string {
 	for {
 		t := agentFenceAfterEndRe.ReplaceAllString(text, "${1}${2}")
 		t = agentFenceBeforeCallRe.ReplaceAllString(t, "$1")
@@ -278,9 +278,9 @@ func normalizeAgentFences(text string) string {
 	}
 }
 
-// trimTrailingAgentFence drops one fence line hanging at the end of s
+// TrimTrailingAgentFence drops one fence line hanging at the end of s
 // (the fence the model placed immediately before <<<TOOL_CALL>>>).
-func trimTrailingAgentFence(s string) string {
+func TrimTrailingAgentFence(s string) string {
 	return agentTrailFenceRe.ReplaceAllString(s, "")
 }
 
@@ -299,10 +299,10 @@ func agentPossibleFencePrefix(s string) bool {
 	return false
 }
 
-// skipLeadingAgentFence returns the length of a bare fence line at the start
+// SkipLeadingAgentFence returns the length of a bare fence line at the start
 // of s (the ``` the model places immediately after <<<END_TOOL_CALL>>>), or 0
 // if s does not begin with one.
-func skipLeadingAgentFence(s string) int {
+func SkipLeadingAgentFence(s string) int {
 	i := 0
 	for i < len(s) && (s[i] == ' ' || s[i] == '\t') {
 		i++
@@ -392,10 +392,10 @@ func agentStreamArguments(raw json.RawMessage) string {
 	return "{}"
 }
 
-// parseAgentToolCalls extracts every complete tool-call block from finished
+// ParseAgentToolCalls extracts every complete tool-call block from finished
 // text and returns OpenAI-format tool_calls objects.
-func parseAgentToolCalls(text string) []map[string]any {
-	text = normalizeAgentFences(text)
+func ParseAgentToolCalls(text string) []map[string]any {
+	text = NormalizeAgentFences(text)
 	var calls []map[string]any
 	for _, match := range agentCallRe.FindAllStringSubmatch(text, -1) {
 		name, args, ok := agentLooseParse(match[1])
@@ -414,31 +414,31 @@ func parseAgentToolCalls(text string) []map[string]any {
 	return calls
 }
 
-// stripAgentToolCalls removes all tool-call blocks from finished text.
-func stripAgentToolCalls(text string) string {
-	text = normalizeAgentFences(text)
+// StripAgentToolCalls removes all tool-call blocks from finished text.
+func StripAgentToolCalls(text string) string {
+	text = NormalizeAgentFences(text)
 	stripped := agentCallRe.ReplaceAllString(text, "")
 	return strings.TrimSpace(stripped)
 }
 
 // ── streaming interceptor ────────────────────────────────────────────────────
 
-// agentStreamInterceptor incrementally separates ordinary text from tool-call
+// AgentStreamInterceptor incrementally separates ordinary text from tool-call
 // blocks. It retains a short suffix so a marker split across upstream chunks
 // is never leaked to the client.
-type agentStreamInterceptor struct {
+type AgentStreamInterceptor struct {
 	buffer     string
 	offset     int
 	callIndex  int
 	pendingSep bool // a tool-call block just closed: watch for a stray fence
 }
 
-type agentParsedChunk struct {
-	content   string
-	toolCalls []map[string]any
+type AgentParsedChunk struct {
+	Content   string
+	ToolCalls []map[string]any
 }
 
-func (in *agentStreamInterceptor) feed(chunk string) agentParsedChunk {
+func (in *AgentStreamInterceptor) Feed(chunk string) AgentParsedChunk {
 	in.buffer += chunk
 	var content []string
 	var toolCalls []map[string]any
@@ -453,7 +453,7 @@ func (in *agentStreamInterceptor) feed(chunk string) agentParsedChunk {
 				for in.offset < len(in.buffer) && isASCIISpace(in.buffer[in.offset]) {
 					in.offset++
 				}
-				n := skipLeadingAgentFence(in.buffer[in.offset:])
+				n := SkipLeadingAgentFence(in.buffer[in.offset:])
 				if n == 0 {
 					break
 				}
@@ -478,7 +478,7 @@ func (in *agentStreamInterceptor) feed(chunk string) agentParsedChunk {
 			break
 		}
 		if start > 0 {
-			piece := trimTrailingAgentFence(rest[:start])
+			piece := TrimTrailingAgentFence(rest[:start])
 			if piece != "" {
 				content = append(content, piece)
 			}
@@ -509,10 +509,10 @@ func (in *agentStreamInterceptor) feed(chunk string) agentParsedChunk {
 		in.offset = end + len(agentToolEnd)
 		in.pendingSep = true // watch for a ``` fence right after the block
 	}
-	return agentParsedChunk{content: strings.Join(content, ""), toolCalls: toolCalls}
+	return AgentParsedChunk{Content: strings.Join(content, ""), ToolCalls: toolCalls}
 }
 
-func (in *agentStreamInterceptor) flush() string {
+func (in *AgentStreamInterceptor) Flush() string {
 	rest := in.buffer[in.offset:]
 	in.offset = len(in.buffer)
 	return rest

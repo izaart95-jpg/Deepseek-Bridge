@@ -1,4 +1,4 @@
-package main
+package dsproxy
 
 import (
 	"context"
@@ -15,9 +15,8 @@ import (
 	"time"
 )
 
-var proxyModels = []map[string]any{
+var ProxyModels = []map[string]any{
 	{"id": "deepseek-chat", "object": "model", "created": 1700000000, "owned_by": "deepseek"},
-	{"id": "deepseek-reasoner", "object": "model", "created": 1700000000, "owned_by": "deepseek"},
 }
 
 // ProxyServer is the OpenAI-compatible proxy (port of proxy.py).
@@ -172,7 +171,7 @@ func (s *ProxyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet {
 		switch path {
 		case "/v1/models", "/models":
-			writeJSON(w, http.StatusOK, map[string]any{"object": "list", "data": proxyModels})
+			writeJSON(w, http.StatusOK, map[string]any{"object": "list", "data": ProxyModels})
 			return
 		case "/history":
 			q := r.URL.Query()
@@ -239,19 +238,36 @@ type chatMessage struct {
 	Name       string              `json:"name,omitempty"`
 }
 
-// chatRequest mirrors the OpenAI-style request body.
-type chatRequest struct {
-	Messages  []chatMessage `json:"messages"`
-	Model     string        `json:"model"`
-	Stream    bool          `json:"stream"`
-	Thinking  bool          `json:"thinking"`
-	DeepThink bool          `json:"deepThink"`
-	Search    bool          `json:"search"`
-	Tools     []openAITool  `json:"tools,omitempty"`
+// reasoningOptions mirrors an OpenAI-style "reasoning" object; only
+// "enabled": true toggles thinking.
+type reasoningOptions struct {
+	Enabled bool `json:"enabled"`
+}
+
+// ChatRequest mirrors the OpenAI-style request body. Thinking is NOT inferred
+// from the model name or legacy flags: it is enabled only when the payload
+// carries "reasoning": {"enabled": true} or a "reasoning_effort" string.
+type ChatRequest struct {
+	Messages        []chatMessage     `json:"messages"`
+	Model           string            `json:"model"`
+	Stream          bool              `json:"stream"`
+	Reasoning       *reasoningOptions `json:"reasoning,omitempty"`
+	ReasoningEffort *string           `json:"reasoning_effort,omitempty"`
+	Search          bool              `json:"search"`
+	Tools           []openAITool      `json:"tools,omitempty"`
+}
+
+// ThinkingRequested reports whether the client payload opted into thinking:
+// "reasoning": {"enabled": true} or any "reasoning_effort": "<string>".
+func ThinkingRequested(req ChatRequest) bool {
+	if req.Reasoning != nil && req.Reasoning.Enabled {
+		return true
+	}
+	return req.ReasoningEffort != nil
 }
 
 func (s *ProxyServer) handleChat(w http.ResponseWriter, r *http.Request) {
-	var body chatRequest
+	var body ChatRequest
 	rawBody, err := decodeBodyRaw(w, r, &body)
 	if err != nil {
 		return
@@ -265,7 +281,9 @@ func (s *ProxyServer) handleChat(w http.ResponseWriter, r *http.Request) {
 		model = "deepseek-chat"
 	}
 	stream := body.Stream
-	thinking := body.Thinking || body.DeepThink || model == "deepseek-reasoner"
+	// Thinking only turns on when explicitly requested via "reasoning" or
+	// "reasoning_effort"; the model name no longer implies it.
+	thinking := ThinkingRequested(body)
 	search := body.Search
 
 	prompt := ""
@@ -396,9 +414,9 @@ func (s *ProxyServer) streamResponse(w http.ResponseWriter, r *http.Request, api
 	sse(contentChunkRole(rid, created, model))
 
 	// agent mode: incrementally split model text from tool-call blocks
-	var interceptor *agentStreamInterceptor
+	var interceptor *AgentStreamInterceptor
 	if agentMode {
-		interceptor = &agentStreamInterceptor{}
+		interceptor = &AgentStreamInterceptor{}
 	}
 	emittedToolCall := false
 
@@ -413,11 +431,11 @@ func (s *ProxyServer) streamResponse(w http.ResponseWriter, r *http.Request, api
 			return false
 		}
 		if interceptor != nil {
-			parsed := interceptor.feed(ch.Content)
-			if parsed.content != "" && !sse(contentChunk(parsed.content, nil)) {
+			parsed := interceptor.Feed(ch.Content)
+			if parsed.Content != "" && !sse(contentChunk(parsed.Content, nil)) {
 				return true
 			}
-			for _, call := range parsed.toolCalls {
+			for _, call := range parsed.ToolCalls {
 				emittedToolCall = true
 				debugf("agent tool call #%d: %s(%s)", call["index"], call["function"].(map[string]any)["name"], call["function"].(map[string]any)["arguments"])
 				if !sse(map[string]any{
@@ -439,7 +457,7 @@ func (s *ProxyServer) streamResponse(w http.ResponseWriter, r *http.Request, api
 	}
 
 	if interceptor != nil {
-		if trailing := interceptor.flush(); trailing != "" {
+		if trailing := interceptor.Flush(); trailing != "" {
 			sse(contentChunk(trailing, nil))
 		}
 	}
@@ -490,13 +508,13 @@ func (s *ProxyServer) blockResponse(w http.ResponseWriter, r *http.Request, api 
 	message := map[string]any{"role": "assistant", "content": answer}
 
 	if agentMode {
-		if calls := parseAgentToolCalls(answer); len(calls) > 0 {
+		if calls := ParseAgentToolCalls(answer); len(calls) > 0 {
 			finishReason = "tool_calls"
 			message["tool_calls"] = calls
 			debugf("agent tool calls parsed: %d", len(calls))
 			debugf("agent tool calls: %s", debugJSON(calls))
 		}
-		answer = stripAgentToolCalls(answer)
+		answer = StripAgentToolCalls(answer)
 		message["content"] = answer
 	}
 
