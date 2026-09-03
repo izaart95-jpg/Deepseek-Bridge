@@ -18,6 +18,7 @@
 - Cookie management (loads `cookies.json`)
 - Streaming and non-streaming responses
 - Threaded conversation support
+- **Session garbage collector** — with history disabled, every request runs on a throwaway chat session that is deleted on DeepSeek right after use, so session IDs never accumulate on the account
 - **Agent mode** (`--agent-mode` / `AGENT_MODE=true`) — OpenAI function/tool calling translated into a single role-tagged prompt; model tool-call blocks are parsed back into OpenAI `tool_calls`
 - **Debug mode** (`--debug` / `DEBUG=true`) — prints every request/response headers and bodies in both directions, PoW challenges, SSE frames and session IDs
 
@@ -129,6 +130,8 @@ curl -X POST http://localhost:3000/history \
   -H "Content-Type: application/json" \
   -d '{"enable": false}'
 ```
+
+> 🧹 **Garbage collector:** with history disabled, each request gets a fresh throwaway chat session. As soon as the response is done, the proxy asynchronously deletes that session upstream (`POST /chat_session/delete`) — mirroring how the Kimi reference cleans up its stateless sessions — so your DeepSeek account doesn't fill up with dead session IDs. Sessions created in history-enabled mode are never deleted; rotating via `POST /new` also collects the session it replaces.
 
 ### `POST /new` — Create a new session
 
