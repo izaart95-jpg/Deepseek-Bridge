@@ -58,7 +58,9 @@ func TestInterceptorSwallowsFencesAcrossChunks(t *testing.T) {
 		content.WriteString(parsed.Content)
 		calls += len(parsed.ToolCalls)
 	}
-	content.WriteString(in.Flush())
+	final := in.Finish()
+	content.WriteString(final.Content)
+	calls += len(final.ToolCalls)
 	out := content.String()
 	if calls != 1 {
 		t.Errorf("expected 1 tool call, got %d", calls)
