@@ -99,6 +99,126 @@ func TestNormalizeAgentFencesTolerantMarkers(t *testing.T) {
 	}
 }
 
+// ── payload tolerance ────────────────────────────────────────────────────────
+//
+// Second live failure mode (goal debug session, deepseek-v4-flash, "Find my
+// public ip"): the markers were canonical, but the model invented a FLAT
+// payload shape — {"tool": "bash", "command": ..., "timeout": 10} instead of
+// {"name": ..., "arguments": {...}}. The strict parser accepted the JSON
+// with Name == "" and the whole block leaked to the client as plain content
+// with finish_reason "stop", so the tool was never executed.
+
+// The exact RESPONSE text reconstructed from the failing debug session.
+const flatPayload = `<<<TOOL_CALL>>>{"tool": "bash", "command": "curl -s ifconfig.me", "timeout": 10}<<<END_TOOL_CALL>>>`
+
+func TestParseAgentToolCallsFlatPayload(t *testing.T) {
+	calls := ParseAgentToolCalls(flatPayload)
+	if len(calls) != 1 {
+		t.Fatalf("ParseAgentToolCalls(flat payload) => %d calls, want 1", len(calls))
+	}
+	fn := calls[0]["function"].(map[string]any)
+	if fn["name"] != "bash" {
+		t.Errorf("name = %v, want bash", fn["name"])
+	}
+	args := fn["arguments"].(string)
+	if !strings.Contains(args, `"command":"curl -s ifconfig.me"`) || !strings.Contains(args, `"timeout":10`) {
+		t.Errorf("arguments = %s, want flat keys folded into an arguments object", args)
+	}
+	if stripped := StripAgentToolCalls(flatPayload); strings.Contains(stripped, "TOOL_CALL") || strings.TrimSpace(stripped) != "" {
+		t.Errorf("StripAgentToolCalls left residue: %q", stripped)
+	}
+}
+
+func TestParseAgentToolCallsPayloadVariants(t *testing.T) {
+	cases := []struct {
+		body     string // JSON body between the markers
+		wantName string
+		wantArgs string // substring the arguments JSON must contain
+	}{
+		// canonical shape keeps working
+		{`{"name":"bash","arguments":{"command":"id"}}`, "bash", `"command":"id"`},
+		// alternate explicit-arguments spellings
+		{`{"name":"bash","parameters":{"command":"id"}}`, "bash", `"command":"id"`},
+		{`{"tool":"bash","arguments":{"command":"id"}}`, "bash", `"command":"id"`},
+		// alternate name keys with flat parameters
+		{`{"tool_name":"read","path":"/etc/hosts"}`, "read", `"/etc/hosts"`},
+		{`{"function":"bash","command":"uname"}`, "bash", `"uname"`},
+		// flat payload keyed on "name"
+		{`{"name":"bash","command":"pwd","timeout":5}`, "bash", `"command":"pwd"`},
+		// a tool parameter literally named "name" must not shadow the tool key
+		{`{"tool":"write","name":"a.txt","content":"x"}`, "write", `"content":"x"`},
+		// no parameters at all
+		{`{"tool":"bash"}`, "bash", `{}`},
+	}
+	for _, c := range cases {
+		text := "<<<TOOL_CALL>>>" + c.body + "<<<END_TOOL_CALL>>>"
+		calls := ParseAgentToolCalls(text)
+		if len(calls) != 1 {
+			t.Errorf("body %s => %d calls, want 1", c.body, len(calls))
+			continue
+		}
+		fn := calls[0]["function"].(map[string]any)
+		if fn["name"] != c.wantName {
+			t.Errorf("body %s => name %v, want %s", c.body, fn["name"], c.wantName)
+		}
+		if args := fn["arguments"].(string); !strings.Contains(args, c.wantArgs) {
+			t.Errorf("body %s => arguments %s, want substring %s", c.body, args, c.wantArgs)
+		}
+	}
+	// No recognizable tool name at all: stays visible text (existing policy).
+	if calls := ParseAgentToolCalls(`<<<TOOL_CALL>>>{"command":"ls"}<<<END_TOOL_CALL>>>`); len(calls) != 0 {
+		t.Errorf("nameless payload produced %d calls, want 0", len(calls))
+	}
+}
+
+// goalFragmentChunks are the upstream SSE fragment appends of the failing
+// session, byte for byte (initial RESPONSE fragment content "<<", then every
+// APPEND/"v" delta from the debug log).
+var goalFragmentChunks = []string{
+	"<<", "<", "TO", "OL", "_C", "ALL", ">>>",
+	"{\"", "tool", "\":", " \"", "bash", "\",", " \"", "command", "\":",
+	" \"", "curl", " -", "s", " if", "config", ".me", "\",", " \"",
+	"time", "out", "\":", " ", "10", "}",
+	"<<", "<", "END", "_TO", "OL", "_C", "ALL", ">>>",
+}
+
+func TestStreamInterceptorReplaysFlatPayloadDebugStream(t *testing.T) {
+	for _, step := range []int{1, 3, 7} {
+		content, calls, args := feedChunks(t, goalFragmentChunks, step)
+		if calls != 1 {
+			t.Errorf("step=%d: %d tool calls, want 1 (content=%q)", step, calls, content)
+		}
+		if !strings.Contains(args, "ifconfig.me") || !strings.Contains(args, `"timeout":10`) {
+			t.Errorf("step=%d: arguments %q missing flat payload parameters", step, args)
+		}
+		if strings.Contains(content, "TOOL_CALL") || strings.TrimSpace(content) != "" {
+			t.Errorf("step=%d: markers or junk leaked as content: %q", step, content)
+		}
+	}
+}
+
+// The prompt must pin the payload schema: the bare "{JSON}" placeholder is
+// what let the model invent the flat shape in the first place.
+func TestAgentPromptPinsPayloadSchema(t *testing.T) {
+	prompt := buildAgentPrompt(
+		[]chatMessage{{Role: "user", Content: []byte(`"Find my public ip"`)}},
+		[]openAITool{{Type: "function", Function: &openAIFnSpec{Name: "bash"}}},
+	)
+	for _, want := range []string{
+		`<<<TOOL_CALL>>>{"name":"<tool_name>","arguments":{<parameter JSON>}}<<<END_TOOL_CALL>>>`,
+		`EXACTLY two keys`,
+		`"name"`,
+		`"arguments"`,
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("agent prompt missing schema fragment %q", want)
+		}
+	}
+	if strings.Contains(prompt, "{JSON}") {
+		t.Errorf("agent prompt still carries the underspecified {JSON} placeholder")
+	}
+}
+
 // ── streaming interceptor ────────────────────────────────────────────────────
 
 // Replays the RESPONSE fragment chunks exactly as they arrived in the failing

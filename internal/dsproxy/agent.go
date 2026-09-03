@@ -144,11 +144,19 @@ func findAgentSpans(text string) []agentSpan {
 //   <current_task>  — the latest user message (recency anchor)
 //   <output_rules>  — final reminder at the very end (heaviest weight)
 
+// agentCallSchema is the exact JSON payload shape required inside a
+// tool-call block. It is stated verbatim in the prompt (and repeated in the
+// final reminder): a bare "{JSON}" placeholder let models invent flat
+// payloads like {"tool": "bash", "command": ...} that the runtime cannot
+// map back to OpenAI tool_calls reliably.
+const agentCallSchema = `{"name":"<tool_name>","arguments":{<parameter JSON>}}`
+
 const agentSystemPrefix = "<system>\n" +
 	"You are a helpful assistant with access to tools. Follow these rules strictly:\n" +
 	"\n" +
 	"REPLY FORMAT \u2014 exactly ONE of:\n" +
-	"(A) TOOL CALL: <<<TOOL_CALL>>>{JSON}<<<END_TOOL_CALL>>> \u2014 nothing before or after.\n" +
+	"(A) TOOL CALL: <<<TOOL_CALL>>>" + agentCallSchema + "<<<END_TOOL_CALL>>> \u2014 nothing before or after.\n" +
+	"    The JSON object has EXACTLY two keys: \"name\" (the tool to call, spelled exactly as in <tools>) and \"arguments\" (an object with ONLY that tool's parameters).\n" +
 	"(B) FINAL ANSWER: plain text, only when no tool applies.\n" +
 	"\n" +
 	"RULES:\n" +
@@ -164,8 +172,9 @@ const agentSystemPrefix = "<system>\n" +
 // is repeated here as the last thing the model sees.
 const agentFinalReminder = `<output_rules>
 RESPOND WITH EXACTLY ONE OF:
-1. <<<TOOL_CALL>>>{JSON}<<<END_TOOL_CALL>>> (no fences, no other text)
+1. <<<TOOL_CALL>>>{"name":"<tool_name>","arguments":{...}}<<<END_TOOL_CALL>>> (no fences, no other text)
 2. Plain text final answer (only if no tool applies to this step)
+The tool-call JSON uses EXACTLY the keys "name" and "arguments" — never a "tool" key, never bare top-level parameters.
 </output_rules>`
 
 var agentMode = false
@@ -670,19 +679,88 @@ func SkipLeadingAgentFence(s string) int {
 	return j
 }
 
-// agentLooseParse parses one tool-call body, tolerating markdown fences.
+// ── payload tolerance ────────────────────────────────────────────────────────
+// The contract asks the model for {"name": "<tool>", "arguments": {...}}, but
+// models observed in the wild (deepseek-v4-flash/pro) invent their own payload
+// shapes when the schema is under-specified — most commonly the FLAT form
+// {"tool": "bash", "command": "...", "timeout": 10} where the tool name sits
+// under "tool" and the parameters are the remaining top-level keys. The old
+// strict {name, arguments} unmarshal accepted such objects with Name == "",
+// so the whole block leaked to the client as plain content with
+// finish_reason "stop" and the tool was never executed. We therefore accept
+// every shape that unambiguously names a tool and its parameters.
+
+// agentNameKeys are accepted spellings of the "which tool" key, in priority
+// order. Explicit tool-* keys outrank "name": in a flat payload a "name"
+// entry is more likely a tool PARAMETER named "name" than the tool itself,
+// while a "tool" entry is never a canonical-shape artifact.
+var agentNameKeys = []string{"tool", "tool_name", "function", "function_name", "name"}
+
+// agentArgKeys are accepted spellings of the explicit "parameters" key.
+var agentArgKeys = []string{"arguments", "parameters", "args", "params", "input"}
+
+// agentExtractCall resolves (name, arguments) from one decoded tool-call
+// payload object, accepting the canonical shape, alternate key spellings,
+// and flat payloads where the parameters are the remaining top-level keys.
+func agentExtractCall(obj map[string]json.RawMessage) (name string, args json.RawMessage, ok bool) {
+	// Locate the tool name under any accepted key spelling.
+	nameKey := ""
+	for _, k := range agentNameKeys {
+		raw, present := obj[k]
+		if !present {
+			continue
+		}
+		var s string
+		if json.Unmarshal(raw, &s) == nil && strings.TrimSpace(s) != "" {
+			name, nameKey = strings.TrimSpace(s), k
+			break
+		}
+	}
+	if nameKey == "" {
+		return "", nil, false
+	}
+
+	// An explicit arguments object wins over the flat fallback.
+	for _, k := range agentArgKeys {
+		if raw, present := obj[k]; present && !isJSONNull(raw) {
+			return name, raw, true
+		}
+	}
+
+	// Flat payload: every remaining top-level key is a parameter.
+	rest := make(map[string]json.RawMessage, len(obj)-1)
+	for k, v := range obj {
+		if k != nameKey {
+			rest[k] = v
+		}
+	}
+	if len(rest) == 0 {
+		return name, json.RawMessage("{}"), true
+	}
+	marshaled, err := json.Marshal(rest)
+	if err != nil {
+		return name, json.RawMessage("{}"), true
+	}
+	return name, marshaled, true
+}
+
+// isJSONNull reports whether raw is whitespace, JSON null, or empty.
+func isJSONNull(raw json.RawMessage) bool {
+	t := bytes.TrimSpace(raw)
+	return len(t) == 0 || bytes.Equal(t, []byte("null"))
+}
+
+// agentLooseParse parses one tool-call body, tolerating markdown fences and
+// the payload shape deviations listed at agentNameKeys / agentArgKeys.
 func agentLooseParse(body string) (name string, args json.RawMessage, ok bool) {
 	raw := strings.TrimSpace(body)
 	raw = agentFenceLead.ReplaceAllString(raw, "")
 	raw = agentFenceTail.ReplaceAllString(raw, "")
-	var value struct {
-		Name      string          `json:"name"`
-		Arguments json.RawMessage `json:"arguments"`
-	}
-	if err := json.Unmarshal([]byte(raw), &value); err != nil {
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(raw), &obj); err != nil || len(obj) == 0 {
 		return "", nil, false
 	}
-	return value.Name, value.Arguments, true
+	return agentExtractCall(obj)
 }
 
 // agentParseArguments normalizes model-provided arguments to compact JSON
