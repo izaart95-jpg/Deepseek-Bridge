@@ -87,20 +87,20 @@ python proxy.py
 
 ## API Reference
 
-The proxy runs at `http://localhost:3000`. All endpoints require the bearer token `deepseek-proxy`.
+The proxy runs at `http://localhost:3000`. All endpoints require the bearer token `Waguri-san`.
 
 ### `POST /history` — Toggle conversation history
 
 ```bash
 # Enable
 curl -X POST http://localhost:3000/history \
-  -H "Authorization: Bearer deepseek-proxy" \
+  -H "Authorization: Bearer Waguri-san" \
   -H "Content-Type: application/json" \
   -d '{"enable": true}'
 
 # Disable
 curl -X POST http://localhost:3000/history \
-  -H "Authorization: Bearer deepseek-proxy" \
+  -H "Authorization: Bearer Waguri-san" \
   -H "Content-Type: application/json" \
   -d '{"enable": false}'
 ```
@@ -109,7 +109,7 @@ curl -X POST http://localhost:3000/history \
 
 ```bash
 curl -X POST http://localhost:3000/new \
-  -H "Authorization: Bearer deepseek-proxy"
+  -H "Authorization: Bearer Waguri-san"
 ```
 
 ### `POST /v1/chat/completions` — Chat completions (OpenAI format)
@@ -120,7 +120,7 @@ Supports `deepseek-chat` and `deepseek-reasoner` models, with optional thinking 
 
 ```bash
 curl -X POST http://localhost:3000/v1/chat/completions \
-  -H "Authorization: Bearer deepseek-proxy" \
+  -H "Authorization: Bearer Waguri-san" \
   -H "Content-Type: application/json" \
   -d '{
     "model": "deepseek-reasoner",
@@ -135,7 +135,7 @@ curl -X POST http://localhost:3000/v1/chat/completions \
 
 ```bash
 curl -X POST http://localhost:3000/v1/chat/completions \
-  -H "Authorization: Bearer deepseek-proxy" \
+  -H "Authorization: Bearer Waguri-san" \
   -H "Content-Type: application/json" \
   -d '{
     "model": "deepseek-reasoner",
@@ -153,13 +153,13 @@ Enable history first, then send messages sequentially — the model retains cont
 ```bash
 # Step 1: Enable history
 curl -X POST http://localhost:3000/history \
-  -H "Authorization: Bearer deepseek-proxy" \
+  -H "Authorization: Bearer Waguri-san" \
   -H "Content-Type: application/json" \
   -d '{"enable": true}'
 
 # Step 2: First message
 curl -X POST http://localhost:3000/v1/chat/completions \
-  -H "Authorization: Bearer deepseek-proxy" \
+  -H "Authorization: Bearer Waguri-san" \
   -H "Content-Type: application/json" \
   -d '{
     "model": "deepseek-chat",
@@ -171,7 +171,7 @@ curl -X POST http://localhost:3000/v1/chat/completions \
 
 # Step 3: Follow-up — model should remember the name
 curl -X POST http://localhost:3000/v1/chat/completions \
-  -H "Authorization: Bearer deepseek-proxy" \
+  -H "Authorization: Bearer Waguri-san" \
   -H "Content-Type: application/json" \
   -d '{
     "model": "deepseek-chat",
