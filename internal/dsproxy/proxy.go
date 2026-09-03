@@ -15,10 +15,6 @@ import (
 	"time"
 )
 
-var ProxyModels = []map[string]any{
-	{"id": "deepseek-chat", "object": "model", "created": 1700000000, "owned_by": "deepseek"},
-}
-
 // ProxyServer is the OpenAI-compatible proxy (port of proxy.py).
 type ProxyServer struct {
 	log      *log.Logger
@@ -244,9 +240,11 @@ type reasoningOptions struct {
 	Enabled bool `json:"enabled"`
 }
 
-// ChatRequest mirrors the OpenAI-style request body. Thinking is NOT inferred
-// from the model name or legacy flags: it is enabled only when the payload
-// carries "reasoning": {"enabled": true} or a "reasoning_effort" string.
+// ChatRequest mirrors the OpenAI-style request body. "model" resolves against
+// the registry in models.go — "deepseek-v4-flash" (default) or
+// "deepseek-v4-pro"; anything else is a 400. Thinking is NOT inferred from the
+// model name or legacy flags: it is enabled only when the payload carries
+// "reasoning": {"enabled": true} or a "reasoning_effort" string.
 type ChatRequest struct {
 	Messages        []chatMessage     `json:"messages"`
 	Model           string            `json:"model"`
@@ -276,13 +274,17 @@ func (s *ProxyServer) handleChat(w http.ResponseWriter, r *http.Request) {
 		debugDumpClientRequest(r, rawBody)
 	}
 
-	model := body.Model
-	if model == "" {
-		model = "deepseek-chat"
+	// Resolve the requested model against the registry. The model is real
+	// configuration: it decides the "model_type" sent upstream and gates the
+	// capabilities the request may use.
+	model, resErr := ResolveModel(body.Model)
+	if resErr != nil {
+		writeError(w, resErr.Error(), "invalid_request_error", "model_not_found", 400)
+		return
 	}
 	stream := body.Stream
 	// Thinking only turns on when explicitly requested via "reasoning" or
-	// "reasoning_effort"; the model name no longer implies it.
+	// "reasoning_effort"; the model name never implies it.
 	thinking := ThinkingRequested(body)
 	search := body.Search
 
@@ -319,6 +321,13 @@ func (s *ProxyServer) handleChat(w http.ResponseWriter, r *http.Request) {
 		prompt = " "
 	}
 
+	// Capability gate: reject feature combinations the model does not support
+	// before any upstream session or PoW work is spent.
+	if capErr := model.ValidateCapabilities(search); capErr != nil {
+		writeError(w, capErr.Error(), "invalid_request_error", "model_capability", 400)
+		return
+	}
+
 	api, err := s.getAPI()
 	if err != nil {
 		writeError(w, err.Error(), "authentication_error", "missing_token", 401)
@@ -348,7 +357,8 @@ func (s *ProxyServer) handleChat(w http.ResponseWriter, r *http.Request) {
 		s.log.Printf("Stateless session: %s", chatID)
 	}
 
-	s.log.Printf("-> model=%-20s think=%-5v search=%-5v history=%-5v agent=%v", model, thinking, search, useHistory, agentMode)
+	s.log.Printf("-> model=%-18s type=%-7s think=%-5v search=%-5v history=%-5v agent=%v",
+		model.ID, model.Type, thinking, search, useHistory, agentMode)
 
 	params := ChatParams{
 		ChatSessionID:   chatID,
@@ -356,12 +366,13 @@ func (s *ProxyServer) handleChat(w http.ResponseWriter, r *http.Request) {
 		ParentMessageID: parID,
 		ThinkingEnabled: thinking,
 		SearchEnabled:   search,
+		ModelType:       string(model.Type),
 	}
 
 	if stream {
-		s.streamResponse(w, r, api, params, model)
+		s.streamResponse(w, r, api, params, model.ID)
 	} else {
-		s.blockResponse(w, r, api, params, model)
+		s.blockResponse(w, r, api, params, model.ID)
 	}
 
 	// Garbage collector: in history=false mode the session was created only
@@ -427,6 +438,17 @@ func (s *ProxyServer) streamResponse(w http.ResponseWriter, r *http.Request, api
 		if ch.Type == "ready" && s.getUseHistory() && ch.ResponseMessageID != nil {
 			s.setHistPar(ch.ResponseMessageID)
 		}
+		// Thinking deltas ride alongside content as reasoning_content,
+		// matching DeepSeek's own OpenAI-compatible field name.
+		if ch.Type == "reasoning" && ch.Content != "" {
+			if !sse(map[string]any{
+				"id": rid, "object": "chat.completion.chunk", "created": created, "model": model,
+				"choices": []any{map[string]any{"index": 0, "delta": map[string]any{"reasoning_content": ch.Content}, "finish_reason": nil}},
+			}) {
+				return true
+			}
+			return false
+		}
 		if ch.Type != "content" || ch.Content == "" {
 			return false
 		}
@@ -486,13 +508,17 @@ func contentChunkRole(rid string, created int64, model string) map[string]any {
 func (s *ProxyServer) blockResponse(w http.ResponseWriter, r *http.Request, api *DeepSeekAPI, params ChatParams, model string) {
 	ctx := r.Context()
 	var parts []string
+	var reasoning []string
 
 	err := api.ChatCompletion(ctx, params, func(ch Chunk) bool {
 		if ch.Type == "ready" && s.getUseHistory() && ch.ResponseMessageID != nil {
 			s.setHistPar(ch.ResponseMessageID)
 		}
-		if ch.Type == "content" && ch.Content != "" {
+		switch {
+		case ch.Type == "content" && ch.Content != "":
 			parts = append(parts, ch.Content)
+		case ch.Type == "reasoning" && ch.Content != "":
+			reasoning = append(reasoning, ch.Content)
 		}
 		return false
 	})
@@ -506,6 +532,10 @@ func (s *ProxyServer) blockResponse(w http.ResponseWriter, r *http.Request, api 
 	answer := strings.Join(parts, "")
 	finishReason := "stop"
 	message := map[string]any{"role": "assistant", "content": answer}
+
+	if thinking := strings.Join(reasoning, ""); thinking != "" {
+		message["reasoning_content"] = thinking
+	}
 
 	if agentMode {
 		if calls := ParseAgentToolCalls(answer); len(calls) > 0 {

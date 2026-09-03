@@ -17,7 +17,7 @@ import (
 
 const deepseekBaseURL = "https://chat.deepseek.com/api/v0"
 
-const deepseekUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36"
+const deepseekUserAgent = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36"
 
 // Error types mirroring api.py's DeepSeekError hierarchy.
 type AuthenticationError struct{ Msg string }
@@ -119,19 +119,31 @@ func (c *DeepSeekAPI) refreshCookies() {
 	c.loadCookies()
 }
 
+// baseHeaders mirrors the current chat.deepseek.com web client (Chrome/149,
+// x-client-version 2.4.0). The old "x-app-version" header is gone from the
+// protocol, and stale version headers make the backend reject Expert
+// ("model_type":"expert") with unsupported_client_by_model.
 func (c *DeepSeekAPI) baseHeaders(powResponse string) http.Header {
 	h := http.Header{}
 	h.Set("accept", "*/*")
-	h.Set("accept-language", "en,fr-FR;q=0.9,fr;q=0.8,es-ES;q=0.7,es;q=0.6,en-US;q=0.5,am;q=0.4,de;q=0.3")
+	h.Set("accept-language", "en-US,en;q=0.9,ur-IN;q=0.8,ur-PK;q=0.7,ur;q=0.6")
 	h.Set("authorization", "Bearer "+c.authToken)
 	h.Set("content-type", "application/json")
 	h.Set("origin", "https://chat.deepseek.com")
+	h.Set("priority", "u=1, i")
 	h.Set("referer", "https://chat.deepseek.com/")
+	h.Set("sec-ch-ua", `"Chromium";v="149", "Not)A;Brand";v="24"`)
+	h.Set("sec-ch-ua-mobile", "?0")
+	h.Set("sec-ch-ua-platform", `"Linux"`)
+	h.Set("sec-fetch-dest", "empty")
+	h.Set("sec-fetch-mode", "cors")
+	h.Set("sec-fetch-site", "same-origin")
 	h.Set("user-agent", deepseekUserAgent)
-	h.Set("x-app-version", "20241129.1")
+	h.Set("x-client-bundle-id", "com.deepseek.chat")
 	h.Set("x-client-locale", "en_US")
 	h.Set("x-client-platform", "web")
-	h.Set("x-client-version", "1.0.0-always")
+	h.Set("x-client-timezone-offset", "19800")
+	h.Set("x-client-version", "2.4.0")
 	if powResponse != "" {
 		h.Set("x-ds-pow-response", powResponse)
 	}
@@ -261,6 +273,14 @@ func (c *DeepSeekAPI) CreateChatSession(ctx context.Context) (string, error) {
 	if !ok {
 		return "", APIError{Msg: "Invalid session creation response format from server"}
 	}
+	// Current protocol nests the session object (client >= 2.x):
+	//   biz_data.chat_session.id
+	// Older builds returned the id directly at biz_data.id.
+	if session, ok := bizData["chat_session"].(map[string]any); ok {
+		if id, _ := session["id"].(string); id != "" {
+			return id, nil
+		}
+	}
 	id, _ := bizData["id"].(string)
 	if id == "" {
 		return "", APIError{Msg: "Invalid session creation response format from server"}
@@ -299,6 +319,32 @@ type ChatParams struct {
 	ParentMessageID any
 	ThinkingEnabled bool
 	SearchEnabled   bool
+	// ModelType selects the backend model class on chat.deepseek.com
+	// ("default" or "expert"). Empty resolves to "default".
+	ModelType string
+}
+
+// BuildChatCompletionBody renders the JSON payload POSTed to DeepSeek's
+// /chat/completion. model_type is always present so every request explicitly
+// names the backend model class it targets.
+func BuildChatCompletionBody(params ChatParams) map[string]any {
+	modelType := params.ModelType
+	if modelType == "" {
+		modelType = string(ModelTypeDefault)
+	}
+	body := map[string]any{
+		"chat_session_id":   params.ChatSessionID,
+		"parent_message_id": nil,
+		"prompt":            params.Prompt,
+		"ref_file_ids":      []any{},
+		"thinking_enabled":  params.ThinkingEnabled,
+		"search_enabled":    params.SearchEnabled,
+		"model_type":        modelType,
+	}
+	if params.ParentMessageID != nil {
+		body["parent_message_id"] = asU32(params.ParentMessageID)
+	}
+	return body
 }
 
 // ChatCompletion streams chunks to onChunk (port of api.py chat_completion).
@@ -324,17 +370,7 @@ func (c *DeepSeekAPI) ChatCompletion(ctx context.Context, params ChatParams, onC
 		debugf("pow response: %s", powResponse)
 	}
 
-	jsonData := map[string]any{
-		"chat_session_id":   params.ChatSessionID,
-		"parent_message_id": nil,
-		"prompt":            params.Prompt,
-		"ref_file_ids":      []any{},
-		"thinking_enabled":  params.ThinkingEnabled,
-		"search_enabled":    params.SearchEnabled,
-	}
-	if params.ParentMessageID != nil {
-		jsonData["parent_message_id"] = asU32(params.ParentMessageID)
-	}
+	jsonData := BuildChatCompletionBody(params)
 
 	body, err := json.Marshal(jsonData)
 	if err != nil {
@@ -377,6 +413,7 @@ func (c *DeepSeekAPI) ChatCompletion(ctx context.Context, params ChatParams, onC
 	}
 
 	reader := bufio.NewReader(resp.Body)
+	stream := &streamState{}
 
 	for {
 		line, err := reader.ReadString('\n')
@@ -395,7 +432,7 @@ func (c *DeepSeekAPI) ChatCompletion(ctx context.Context, params ChatParams, onC
 				if err := json.Unmarshal([]byte(dataStr), &data); err != nil {
 					return APIError{Msg: fmt.Sprintf("Invalid JSON in response chunk: %v", err)}
 				}
-				chunks, complete, err := parseStreamData(data)
+				chunks, complete, err := parseStreamData(data, stream)
 				if err != nil {
 					return err
 				}
@@ -421,13 +458,48 @@ func (c *DeepSeekAPI) ChatCompletion(ctx context.Context, params ChatParams, onC
 	return nil
 }
 
+// streamState carries per-stream context needed to interpret incremental
+// JSON-patch events: deltas append to the LAST fragment
+// (response/fragments/-1), so knowing its type tells thinking text apart
+// from answer text.
+type streamState struct {
+	tailFragType string // "THINK", "RESPONSE", ... of the tail fragment
+}
+
+// chunkTypeForFrag maps a fragment type to the chunk channel it streams on.
+// The backend spells the thinking kind "THINK"; accept any THINK* spelling
+// defensively. Everything unknown counts as answer content.
+func chunkTypeForFrag(fragType string) string {
+	if strings.HasPrefix(strings.ToUpper(fragType), "THINK") {
+		return "reasoning"
+	}
+	return "content"
+}
+
 // parseStreamData converts one SSE data payload into chunks (port of the
 // event handling in api.py chat_completion, adapted to the live protocol:
 // status FINISHED arrives without an "o" field, content appends use
 // "response/content" or "response/fragments/-1/content" paths).
-func parseStreamData(data map[string]any) ([]Chunk, bool, error) {
+//
+// Reasoning (thinking) text is yielded as separate "reasoning" chunks so it
+// never leaks into the answer content.
+func parseStreamData(data map[string]any, st *streamState) ([]Chunk, bool, error) {
 	var chunks []Chunk
 	complete := false
+
+	// Protocol errors arrive as {"type":"error","content":...,
+	// "finish_reason":...} (e.g. unsupported_client_by_model). They must
+	// abort the stream with a real error, never degrade to an empty answer.
+	if strVal(data, "type") == "error" {
+		msg := strings.TrimSpace(strVal(data, "content"))
+		if msg == "" {
+			msg = "upstream error event"
+		}
+		if finish := strVal(data, "finish_reason"); finish != "" {
+			msg = fmt.Sprintf("%s (finish_reason=%s)", msg, finish)
+		}
+		return nil, false, APIError{Msg: msg}
+	}
 
 	if _, ok := data["request_message_id"]; ok {
 		chunks = append(chunks, Chunk{
@@ -460,13 +532,24 @@ func parseStreamData(data map[string]any) ([]Chunk, bool, error) {
 					if !ok {
 						continue
 					}
-					if f["type"] == "RESPONSE" {
+					content := strVal(f, "content")
+					if content == "" {
+						continue
+					}
+					if ct := chunkTypeForFrag(strVal(f, "type")); ct == "reasoning" {
+						chunks = append(chunks, Chunk{Type: ct, Content: content})
+					} else {
 						chunks = append(chunks, Chunk{
-							Type:       "content",
-							Content:    strVal(f, "content"),
+							Type:       ct,
+							Content:    content,
 							FragmentID: strVal(f, "id"),
 							StageID:    strVal(f, "stage_id"),
 						})
+					}
+				}
+				if n := len(fragments); n > 0 {
+					if f, ok := fragments[n-1].(map[string]any); ok {
+						st.tailFragType = strVal(f, "type")
 					}
 				}
 			}
@@ -483,7 +566,35 @@ func parseStreamData(data map[string]any) ([]Chunk, bool, error) {
 			return chunks, true, nil
 		}
 		op := strVal(data, "o")
-		if op == "APPEND" && (path == "response/fragments/-1/content" || path == "response/content") {
+		// A whole new fragment object arrives with its type: it becomes the
+		// new tail fragment, and RESPONSE fragments carry their full content.
+		if op == "APPEND" && path == "response/fragments" {
+			if frags, ok := data["v"].([]any); ok {
+				for _, frag := range frags {
+					f, ok := frag.(map[string]any)
+					if !ok {
+						continue
+					}
+					st.tailFragType = strVal(f, "type")
+					content := strVal(f, "content")
+					if content == "" {
+						continue
+					}
+					chunks = append(chunks, Chunk{Type: chunkTypeForFrag(st.tailFragType), Content: content})
+				}
+			}
+			return chunks, false, nil
+		}
+		// The tail fragment switched kind (e.g. THINKING -> RESPONSE).
+		if op == "SET" && path == "response/fragments/-1/type" {
+			st.tailFragType = strVal(data, "v")
+			return chunks, false, nil
+		}
+		if op == "APPEND" && path == "response/fragments/-1/content" {
+			if v, ok := data["v"].(string); ok {
+				chunks = append(chunks, Chunk{Type: chunkTypeForFrag(st.tailFragType), Content: v})
+			}
+		} else if op == "APPEND" && path == "response/content" {
 			if v, ok := data["v"].(string); ok {
 				chunks = append(chunks, Chunk{Type: "content", Content: v})
 			}
@@ -512,7 +623,9 @@ func parseStreamData(data map[string]any) ([]Chunk, bool, error) {
 	}
 
 	if v, ok := data["v"].(string); ok {
-		chunks = append(chunks, Chunk{Type: "content", Content: v})
+		// Bare {"v": ...} events continue the previous patch context, i.e.
+		// they append to the current tail fragment.
+		chunks = append(chunks, Chunk{Type: chunkTypeForFrag(st.tailFragType), Content: v})
 		return chunks, false, nil
 	}
 
