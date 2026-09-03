@@ -69,8 +69,14 @@ func (s *ProxyServer) newHist() (string, error) {
 		return "", err
 	}
 	s.hl.Lock()
+	old := s.histChatID
 	s.histChatID, s.histParID = cid, nil
 	s.hl.Unlock()
+	// The replaced history session is no longer referenced anywhere; collect
+	// it so /new rotations don't leak sessions server-side either.
+	if old != "" && old != cid {
+		s.gcSessions("rotated-out-history", old)
+	}
 	s.log.Printf("New history session: %s", cid)
 	return cid, nil
 }
@@ -97,6 +103,39 @@ func (s *ProxyServer) getUseHistory() bool {
 	s.hl.Lock()
 	defer s.hl.Unlock()
 	return s.useHistory
+}
+
+// gcSessions asynchronously deletes used-up chat sessions on DeepSeek so
+// their IDs don't accumulate on the account. This mirrors the Kimi reference's
+// deleteChat-after-use behavior (references/main.go): sessions are temporary
+// by design and are removed right after their last use, in a background
+// goroutine so response latency is unaffected. Deletion is best-effort —
+// failures are logged and otherwise ignored.
+func (s *ProxyServer) gcSessions(reason string, sessionIDs ...string) {
+	ids := make([]string, 0, len(sessionIDs))
+	for _, id := range sessionIDs {
+		if id != "" {
+			ids = append(ids, id)
+		}
+	}
+	if len(ids) == 0 {
+		return
+	}
+	go func() {
+		api, err := s.getAPI()
+		if err != nil {
+			s.log.Printf("[GC:%s] skip delete %v: %v", reason, ids, err)
+			return
+		}
+		// Own context: the triggering request may already be gone by now.
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := api.DeleteChatSession(ctx, ids...); err != nil {
+			s.log.Printf("[GC:%s] failed to delete session(s) %v: %v", reason, ids, err)
+			return
+		}
+		s.log.Printf("[GC:%s] deleted chat session(s): %v", reason, ids)
+	}()
 }
 
 func (s *ProxyServer) checkAuth(r *http.Request) bool {
@@ -270,7 +309,8 @@ func (s *ProxyServer) handleChat(w http.ResponseWriter, r *http.Request) {
 
 	var chatID string
 	var parID any
-	if s.getUseHistory() {
+	useHistory := s.getUseHistory()
+	if useHistory {
 		chatID, parID = s.getHist()
 		if chatID == "" {
 			chatID, err = s.newHist()
@@ -290,7 +330,7 @@ func (s *ProxyServer) handleChat(w http.ResponseWriter, r *http.Request) {
 		s.log.Printf("Stateless session: %s", chatID)
 	}
 
-	s.log.Printf("-> model=%-20s think=%-5v search=%-5v history=%-5v agent=%v", model, thinking, search, s.getUseHistory(), agentMode)
+	s.log.Printf("-> model=%-20s think=%-5v search=%-5v history=%-5v agent=%v", model, thinking, search, useHistory, agentMode)
 
 	params := ChatParams{
 		ChatSessionID:   chatID,
@@ -304,6 +344,14 @@ func (s *ProxyServer) handleChat(w http.ResponseWriter, r *http.Request) {
 		s.streamResponse(w, r, api, params, model)
 	} else {
 		s.blockResponse(w, r, api, params, model)
+	}
+
+	// Garbage collector: in history=false mode the session was created only
+	// for this one request. Once the response has been fully written (or the
+	// upstream failed), it will never be referenced again — asynchronously
+	// delete it upstream so session IDs don't pile up on the account.
+	if !useHistory && chatID != "" {
+		s.gcSessions("stateless", chatID)
 	}
 }
 

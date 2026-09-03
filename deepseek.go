@@ -268,6 +268,30 @@ func (c *DeepSeekAPI) CreateChatSession(ctx context.Context) (string, error) {
 	return id, nil
 }
 
+// DeleteChatSession removes chat sessions server-side so their IDs don't
+// accumulate on the account. The endpoint accepts an array of IDs, mirroring:
+//
+//	POST /chat_session/delete
+//	{"chat_session_ids":["d1b09b01-3501-4083-b826-d631b1297f1b"]}
+//	-> {"code":0,"msg":"","data":{"biz_code":0,"biz_msg":"","biz_data":null}}
+//
+// No PoW challenge is required for this endpoint.
+func (c *DeepSeekAPI) DeleteChatSession(ctx context.Context, sessionIDs ...string) error {
+	if len(sessionIDs) == 0 {
+		return nil
+	}
+	ids := make([]any, len(sessionIDs))
+	for i, id := range sessionIDs {
+		if id == "" {
+			return APIError{Msg: "DeleteChatSession: empty session ID"}
+		}
+		ids[i] = id
+	}
+	_, err := c.makeRequest(ctx, "POST", "/chat_session/delete",
+		map[string]any{"chat_session_ids": ids}, false)
+	return err
+}
+
 // ChatParams mirror the JSON body of /chat/completion.
 type ChatParams struct {
 	ChatSessionID   string
