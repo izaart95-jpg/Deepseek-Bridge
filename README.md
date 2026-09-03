@@ -114,20 +114,20 @@ Enable with `--debug` or `DEBUG=1|true|yes|on`. Every exchange is printed to std
 
 ## API Reference
 
-The proxy runs at `http://localhost:3000`. All endpoints require the bearer token `Waguri-san`.
+The proxy runs at `http://localhost:3000`. All endpoints require the bearer token `Waguri`.
 
 ### `POST /history` — Toggle conversation history
 
 ```bash
 # Enable
 curl -X POST http://localhost:3000/history \
-  -H "Authorization: Bearer Waguri-san" \
+  -H "Authorization: Bearer Waguri" \
   -H "Content-Type: application/json" \
   -d '{"enable": true}'
 
 # Disable
 curl -X POST http://localhost:3000/history \
-  -H "Authorization: Bearer Waguri-san" \
+  -H "Authorization: Bearer Waguri" \
   -H "Content-Type: application/json" \
   -d '{"enable": false}'
 ```
@@ -138,7 +138,7 @@ curl -X POST http://localhost:3000/history \
 
 ```bash
 curl -X POST http://localhost:3000/new \
-  -H "Authorization: Bearer Waguri-san"
+  -H "Authorization: Bearer Waguri"
 ```
 
 ### Models
@@ -165,7 +165,7 @@ Thinking mode stays **off** unless the request payload contains `"reasoning": {"
 
 ```bash
 curl -X POST http://localhost:3000/v1/chat/completions \
-  -H "Authorization: Bearer Waguri-san" \
+  -H "Authorization: Bearer Waguri" \
   -H "Content-Type: application/json" \
   -d '{
     "model": "deepseek-v4-flash",
@@ -180,7 +180,7 @@ curl -X POST http://localhost:3000/v1/chat/completions \
 
 ```bash
 curl -X POST http://localhost:3000/v1/chat/completions \
-  -H "Authorization: Bearer Waguri-san" \
+  -H "Authorization: Bearer Waguri" \
   -H "Content-Type: application/json" \
   -d '{
     "model": "deepseek-v4-pro",
@@ -197,13 +197,13 @@ Enable history first, then send messages sequentially — the model retains cont
 ```bash
 # Step 1: Enable history
 curl -X POST http://localhost:3000/history \
-  -H "Authorization: Bearer Waguri-san" \
+  -H "Authorization: Bearer Waguri" \
   -H "Content-Type: application/json" \
   -d '{"enable": true}'
 
 # Step 2: First message
 curl -X POST http://localhost:3000/v1/chat/completions \
-  -H "Authorization: Bearer Waguri-san" \
+  -H "Authorization: Bearer Waguri" \
   -H "Content-Type: application/json" \
   -d '{
     "model": "deepseek-v4-flash",
@@ -214,7 +214,7 @@ curl -X POST http://localhost:3000/v1/chat/completions \
 
 # Step 3: Follow-up — model should remember the name
 curl -X POST http://localhost:3000/v1/chat/completions \
-  -H "Authorization: Bearer Waguri-san" \
+  -H "Authorization: Bearer Waguri" \
   -H "Content-Type: application/json" \
   -d '{
     "model": "deepseek-v4-flash",
