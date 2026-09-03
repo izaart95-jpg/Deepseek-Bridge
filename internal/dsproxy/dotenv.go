@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -26,6 +27,17 @@ func envOr(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// intEnvOr reads an integer environment variable, falling back to def when
+// unset or unparseable.
+func intEnvOr(key string, def int) int {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil {
+			return n
+		}
+	}
+	return def
 }
 
 // loadDotEnv loads KEY=VALUE pairs from the first .env file found (the

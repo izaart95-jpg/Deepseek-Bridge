@@ -20,6 +20,8 @@
 - Streaming and non-streaming responses
 - Threaded conversation support
 - **Session garbage collector** — with history disabled, every request runs on a throwaway chat session that is deleted on DeepSeek right after use, so session IDs never accumulate on the account
+- **Async session-pool mode (default)** — a standing batch of 3 pre-made sessions is kept warm at all times; stateless requests grab one instantly instead of paying per-request creation latency, and each consumed session is deleted upstream + replaced the moment its response is fully processed. `--sync-mode` restores the legacy synchronous flow
+- **Graceful shutdown** — CTRL+C drains in-flight requests, then clears every remaining pooled session on DeepSeek before exiting (a second CTRL+C force-exits)
 - **Agent mode** (`--agent-mode` / `AGENT_MODE=true`) — OpenAI function/tool calling translated into a single role-tagged prompt; model tool-call blocks are parsed back into OpenAI `tool_calls`
 - **Debug mode** (`--debug` / `DEBUG=true`) — prints every request/response headers and bodies in both directions, PoW challenges, SSE frames and session IDs
 
@@ -87,6 +89,27 @@ DEEPSEEK_TOKEN=<token> AGENT_MODE=true ./deepseek-proxy proxy
 # or: ./deepseek-proxy --agent-mode proxy
 ```
 
+### Sync vs async session flow
+
+By default, stateless traffic (`/history` disabled) runs through the **async** flow:
+
+- At startup the proxy **pre-makes a standing batch of 3 chat sessions** so completion requests never wait on per-request session creation.
+- Each request takes a ready session from the batch instantly; multiple concurrent requests are served in parallel up to the batch size.
+- Only after a response has been **fully written and processed** is that consumed session deleted upstream (`POST /chat_session/delete`) and a replacement created immediately — the batch refills itself for as long as the app runs.
+- If a burst exhausts the batch, extra requests wait up to `SESSION_ACQUIRE_TIMEOUT` seconds (default 10) and then create a session directly instead of stalling; those still go through the garbage collector afterwards.
+
+```bash
+# tune the async flow (optional)
+SESSION_POOL_SIZE=3            # standing ready-session batch size
+SESSION_ACQUIRE_TIMEOUT=10     # seconds to wait for a pooled session (0 = forever)
+```
+
+For backward compatibility, `--sync-mode` (or `SYNC_MODE=true`) restores the legacy synchronous flow: every request creates its own session first, then completes, then the session is garbage-collected — one request at a time per client, no pre-warming.
+
+### Graceful shutdown
+
+Pressing CTRL+C (or sending SIGTERM) stops the proxy respectfully: it stops accepting new connections, lets in-flight responses finish (10s drain deadline), prints `clearing all sessions...`, deletes every remaining pooled session on DeepSeek so nothing is left behind, and only then exits. A second CTRL+C force-exits immediately.
+
 ### Agent mode
 
 Enable with `--agent-mode` or `AGENT_MODE=1|true|yes|on`. The proxy rewrites the whole OpenAI `messages` array (system/user/assistant/`tool` roles) plus the `tools` definitions into one role-tagged prompt ending in a `[TOOL CONTRACT]`. When the model wants to call a tool it emits a block like:
@@ -132,7 +155,7 @@ curl -X POST http://localhost:3000/history \
   -d '{"enable": false}'
 ```
 
-> 🧹 **Garbage collector:** with history disabled, each request gets a fresh throwaway chat session. As soon as the response is done, the proxy asynchronously deletes that session upstream (`POST /chat_session/delete`) — so your DeepSeek account doesn't fill up with dead session IDs. Sessions created in history-enabled mode are never deleted; rotating via `POST /new` also collects the session it replaces.
+> 🧹 **Garbage collector:** with history disabled, each request gets a throwaway chat session. As soon as the response is done, the proxy asynchronously deletes that session upstream (`POST /chat_session/delete`) — so your DeepSeek account doesn't fill up with dead session IDs. In the default async mode the deleted session is instantly replaced from a pre-made batch; sessions created in history-enabled mode are never deleted, and rotating via `POST /new` also collects the session it replaces.
 
 ### `POST /new` — Create a new session
 
