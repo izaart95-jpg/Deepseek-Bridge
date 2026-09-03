@@ -29,10 +29,23 @@ type ProxyServer struct {
 	histChatID string
 	histParID  any
 	useHistory bool
+
+	// Async mode (history=false only): pool != nil enables the pre-warmed
+	// session-pool flow. It is attached once at startup, before serving.
+	pool *SessionPool
+	// poolWait bounds how long a request waits for a pooled session before
+	// falling back to creating one directly (0 waits forever).
+	poolWait time.Duration
 }
 
 func NewProxyServer(logger *log.Logger, proxyKey string) *ProxyServer {
-	return &ProxyServer{log: logger, proxyKey: proxyKey}
+	return &ProxyServer{log: logger, proxyKey: proxyKey, poolWait: defaultPoolWait}
+}
+
+// AttachSessionPool switches the history=false path to the async flow backed
+// by a pre-warmed session pool. Must be called before the server starts.
+func (s *ProxyServer) AttachSessionPool(p *SessionPool) {
+	s.pool = p
 }
 
 func (s *ProxyServer) getAPI() (*DeepSeekAPI, error) {
@@ -336,8 +349,12 @@ func (s *ProxyServer) handleChat(w http.ResponseWriter, r *http.Request) {
 
 	var chatID string
 	var parID any
+	// pooled marks sessions owned by the session pool (async mode); they are
+	// retired through pool.Release, everything else keeps the legacy GC path.
+	pooled := false
 	useHistory := s.getUseHistory()
-	if useHistory {
+	switch {
+	case useHistory:
 		chatID, parID = s.getHist()
 		if chatID == "" {
 			chatID, err = s.newHist()
@@ -347,7 +364,32 @@ func (s *ProxyServer) handleChat(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
-	} else {
+	case s.pool != nil:
+		// Async mode: take a pre-made session from the standing batch so no
+		// per-request creation latency is paid. If the batch is starved (a
+		// burst bigger than the pool) we wait a bounded time and then create
+		// one directly rather than stalling the client indefinitely.
+		id, acqErr := s.pool.Acquire(r.Context(), s.poolWait)
+		switch {
+		case acqErr == nil:
+			chatID, pooled = id, true
+			s.log.Printf("Pooled stateless session: %s (%d/%d ready)", chatID, len(s.pool.ready), s.pool.size)
+		case errors.Is(acqErr, ErrPoolTimeout):
+			chatID, err = api.CreateChatSession(context.Background())
+			if err != nil {
+				writeError(w, err.Error(), "upstream_error", nil, 502)
+				return
+			}
+			s.log.Printf("Stateless session (pool busy, created on demand): %s", chatID)
+		default: // ErrPoolClosing, or the request's client went away
+			if errors.Is(acqErr, context.Canceled) || r.Context().Err() != nil {
+				return // client gone; nothing to answer
+			}
+			writeError(w, "server is shutting down", "server_error", "shutting_down", 503)
+			return
+		}
+		parID = nil
+	default:
 		chatID, err = api.CreateChatSession(context.Background())
 		parID = nil
 		if err != nil {
@@ -375,12 +417,21 @@ func (s *ProxyServer) handleChat(w http.ResponseWriter, r *http.Request) {
 		s.blockResponse(w, r, api, params, model.ID)
 	}
 
-	// Garbage collector: in history=false mode the session was created only
+	// Session retirement: in history=false mode the session was used only
 	// for this one request. Once the response has been fully written (or the
-	// upstream failed), it will never be referenced again — asynchronously
-	// delete it upstream so session IDs don't pile up on the account.
+	// upstream definitively failed) it will never be referenced again.
+	//
+	// Async mode: pool-owned sessions are retired through the pool, which
+	// deletes the consumed session upstream and immediately creates a
+	// replacement so the standing batch refills. Sessions handed out while
+	// the batch was busy (created on demand) and sync-mode sessions keep the
+	// legacy fire-and-forget GC path.
 	if !useHistory && chatID != "" {
-		s.gcSessions("stateless", chatID)
+		if pooled {
+			s.pool.Release(chatID)
+		} else {
+			s.gcSessions("stateless", chatID)
+		}
 	}
 }
 
