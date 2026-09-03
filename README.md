@@ -1,8 +1,8 @@
 # DeepSeek Free API
 
-> A Python proxy for DeepSeek with Cloudflare bypass and OpenAI-compatible interface — no paid API key required.
+> A pure Go proxy for DeepSeek with Cloudflare bypass and OpenAI-compatible interface — no paid API key required.
 
-![Python](https://img.shields.io/badge/Python-3.x-blue?style=flat-square)
+![Go](https://img.shields.io/badge/Go-1.26+-blue?style=flat-square)
 ![OpenAI Compatible](https://img.shields.io/badge/OpenAI-Compatible-green?style=flat-square)
 ![Cloudflare Bypass](https://img.shields.io/badge/Cloudflare-Bypass-purple?style=flat-square)
 ![Free API](https://img.shields.io/badge/API-Free-orange?style=flat-square)
@@ -11,12 +11,12 @@
 
 ## Features
 
-- Full DeepSeek API implementation
-- Cloudflare protection bypass
-- Proof of Work (PoW) challenge solving
+- Full DeepSeek API implementation (pure Go, zero runtime dependencies)
+- Cloudflare protection detection with automatic retry
+- Proof of Work (PoW) challenge solving — WASM run in-process via wazero
 - OpenAI-compatible proxy server
 - Interactive CLI chat client
-- Cookie management system
+- Cookie management (loads `cookies.json`)
 - Streaming and non-streaming responses
 - Threaded conversation support
 
@@ -31,12 +31,10 @@ git clone https://github.com/izaart95-jpg/DeepRouter.git
 cd DeepRouter
 ```
 
-### 2. Install dependencies
+### 2. Build (requires Go 1.26+)
 
 ```bash
-pip install -r requirements.txt
-# or, to ensure latest versions:
-pip install --upgrade -r requirements.txt
+go build -o deepseek-proxy .
 ```
 
 ### 3. Obtain your DeepSeek token
@@ -69,19 +67,25 @@ $env:DEEPSEEK_TOKEN="your_token_here"
 
 ## Running
 
-### Interactive CLI chat
-
-```bash
-python interactive_chat.py
-```
-
 ### OpenAI-compatible proxy server
 
 ```bash
-python proxy.py
+# requires Go 1.26+ (https://go.dev/dl/go1.26.5.linux-amd64.tar.gz)
+go build -o deepseek-proxy .
+DEEPSEEK_TOKEN=<token> ./deepseek-proxy proxy
 ```
 
-> **Note:** Best results with Python below 3.12. Compatibility issues may occur on newer versions.
+### Interactive CLI chat client
+
+```bash
+DEEPSEEK_TOKEN=<token> ./deepseek-proxy chat
+```
+
+### Test suite (requires DEEPSEEK_TOKEN)
+
+```bash
+DEEPSEEK_TOKEN=<token> go test -v .
+```
 
 ---
 
