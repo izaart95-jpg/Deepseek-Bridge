@@ -93,14 +93,14 @@ DEEPSEEK_TOKEN=<token> AGENT_MODE=true ./deepseek-proxy proxy
 
 By default, stateless traffic (`/history` disabled) runs through the **async** flow:
 
-- At startup the proxy **pre-makes a standing batch of 12 chat sessions** so completion requests never wait on per-request session creation.
+- At startup the proxy **pre-makes a standing batch of 5 chat sessions** so completion requests never wait on per-request session creation.
 - Each request takes a ready session from the batch instantly; multiple concurrent requests are served in parallel up to the batch size.
 - Only after a response has been **fully written and processed** is that consumed session deleted upstream (`POST /chat_session/delete`) and a replacement created immediately — the batch refills itself for as long as the app runs.
 - If a burst exhausts the batch, extra requests wait up to `SESSION_ACQUIRE_TIMEOUT` seconds (default 10) and then create a session directly instead of stalling; those still go through the garbage collector afterwards.
 
 ```bash
 # tune the async flow (optional)
-SESSION_POOL_SIZE=12            # standing ready-session batch size
+SESSION_POOL_SIZE=5            # standing ready-session batch size
 SESSION_ACQUIRE_TIMEOUT=10     # seconds to wait for a pooled session (0 = forever)
 ```
 
