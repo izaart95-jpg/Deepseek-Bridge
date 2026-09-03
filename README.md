@@ -125,6 +125,8 @@ These blocks never reach your client as text:
 - **Non-streaming** → parsed into OpenAI `tool_calls` on the assistant message, `finish_reason: "tool_calls"`; send the tool result back as a `role:"tool"` message.
 - **Streaming** → content deltas flow normally, each parsed call becomes a `delta.tool_calls` chunk, and the stream ends with `finish_reason: "tool_calls"`.
 
+The prompt pins the exact `{"name","arguments"}` schema, and the parser additionally tolerates the flat payload shapes models sometimes emit anyway (e.g. `{"tool":"bash","command":"ls"}` — tool name under `tool`/`tool_name`/`function`, parameters as the remaining top-level keys, or `parameters`/`args` in place of `arguments`), folding them back into proper `tool_calls` instead of leaking the block to the client as text.
+
 Web search is forced off in this mode so tool answers stay deterministic.
 
 ### Debug mode
